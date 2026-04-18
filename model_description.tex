@@ -1,0 +1,608 @@
+\documentclass[11pt]{article}
+
+% --- Page geometry ---------------------------------------------------------
+\usepackage[letterpaper,margin=1in]{geometry}
+
+% --- Math, symbols, tables -------------------------------------------------
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{enumitem}
+
+% --- Pseudocode ------------------------------------------------------------
+\usepackage{algorithm}
+\usepackage{algorithmic}
+
+% --- Typography / references -----------------------------------------------
+\usepackage{microtype}
+\usepackage{hyperref}
+
+% --- Fallback "cref" so the document compiles without the cleveref package ---
+% \cref{key} -> behaves like \ref{key}; \Cref{key} -> "Ref. \ref{key}".
+\providecommand{\cref}[1]{\ref{#1}}
+\providecommand{\Cref}[1]{Ref.~\ref{#1}}
+
+% --- Convenience macros ----------------------------------------------------
+\newcommand{\x}{\mathbf{x}}
+\newcommand{\A}{\mathbf{A}}
+\newcommand{\B}{\mathbf{B}}
+\newcommand{\Sx}{\mathbf{S}_x}
+\newcommand{\Roster}{\mathrm{Roster}}
+\newcommand{\Hist}{\mathcal{H}}
+\newcommand{\qhat}{\hat{q}}
+\newcommand{\rep}{\mathrm{rep}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\self}{\mathrm{self}}
+\newcommand{\brk}{\mathrm{broker}}
+\newcommand{\Ntot}{N}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator{\tr}{tr}
+
+% --- Algorithmic block aliases ---------------------------------------------
+% (none; using the classic algorithmic package)
+
+\title{Transient Brokerage in Matching Markets:\\
+An Agent-Based Model of Intermediated Search and Learning\\[4pt]
+\large Base Model Specification (No Capture)}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We describe an agent-based model of a matching market in which $\Ntot$ heterogeneous agents repeatedly form pairwise matches either through their own network (self-search) or through a single broker intermediary. Each match realizes an economic value that depends on both parties' type vectors via an unknown, regime-gated bilinear matching function, and every realized match feeds into a per-agent history used to train a neural network that predicts future match quality. Agents and broker coexist on an evolving small-world graph that densifies as matches create direct ties, and agents choose between channels via an EWMA of realized payoffs. This document specifies the base model's state, equations, timing, and parameters in enough detail to permit faithful reimplementation. The variant in which the broker can capture counterparty positions is deferred.
+\end{abstract}
+
+\section{Motivation}
+
+The structural-hole theory of brokerage \cite{burt1992} locates a broker's value in its network position bridging otherwise-disconnected parties. At scale that position is self-liquidating: every successful match creates a direct tie that erodes the very holes the broker exploited. A complementary view, which this model formalizes, treats brokerage as outsourced relational work. Each brokered match leaves an informational byproduct --- a cross-market observation of which pairings succeed --- that accumulates asymmetrically on the broker side. When the matching problem is hard enough, that informational capital can compound faster than the structural capital erodes.
+
+The model is a discrete-time agent-based simulation of this two-force dynamic. Agents are boundedly rational: no agent holds beliefs about other agents' strategies, and all decisions reduce to heuristic comparisons of summary statistics of past experience \cite{brenner2006}. The broker is modelled as a single monopolistic intermediary. The \emph{base model} described here contains no capture mechanism; the broker exclusively acts as an intermediary. The resource-capture variant, in which the broker can additionally act as principal and take inventory positions on counterparty blocks, is a strict extension and is not specified here.
+
+\section{Model Overview and Notation}
+
+The market comprises $\Ntot$ agents and one broker, indexed by $i \in \{1,\ldots,\Ntot\}$ and $b$, evolving for $t = 1,\ldots,T$ discrete periods (each period interpreted as one calendar quarter). All economic quantities share the same monetary unit. The state at period $t$ consists of a type vector and history for each agent, an undirected graph $G^t$ on the $\Ntot + 1$ nodes, and state variables carried by the broker. \Cref{tab:notation} collects every symbol used in the specification along with its dimension.
+
+{\small
+\begin{longtable}{@{}p{0.18\linewidth}p{0.27\linewidth}p{0.48\linewidth}@{}}
+\caption{Notation. All dimensions assume the default $d=8$. Sets are written
+ $\mathcal{X}$; matrices $\mathbf{M} \in \R^{a\times b}$; vectors
+ $\mathbf{v}\in\R^{a}$.}\label{tab:notation}\\
+\toprule
+\textbf{Symbol} & \textbf{Space / dimension} & \textbf{Meaning}\\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Symbol} & \textbf{Space / dimension} & \textbf{Meaning}\\
+\midrule
+\endhead
+\multicolumn{3}{r}{\emph{continued on next page}}\\
+\endfoot
+\bottomrule
+\endlastfoot
+$\Ntot$ & $\mathbb{N}$ & Number of agents (default $1000$).\\
+$T, T_{\text{burn}}$ & $\mathbb{N}$ & Total periods; burn-in discarded from analysis (default $200, 30$).\\
+$d$ & $\mathbb{N}$ & Type-vector dimensionality (default $8$).\\
+$s$ & $\{1,\ldots,d\}$ & Active dimensions of the type curve (default $s=d$).\\
+$K$ & $\mathbb{N}$ & Per-agent match capacity (default $5$).\\
+$k$ & $\mathbb{N}$, even & Small-world ring-lattice degree (default $6$).\\
+$p_{\text{rewire}}$ & $[0,1]$ & Watts--Strogatz rewiring probability (default $0.1$).\\
+$p_{\text{demand}}$ & $[0,1]$ & Per-slot demand probability (default $0.5$).\\
+$\eta$ & $[0,1)$ & Per-period agent exit probability (default $0.02$).\\
+$p_{\text{roster}}$ & $[0,1]$ & Per-period standing-roster churn probability (default $0.02$).\\
+$\alpha_R$ & $[0,1]$ & Target roster share, $R^* = \lceil \alpha_R \Ntot\rceil$ (default $0.20$).\\
+$n_s$ & $\mathbb{N}$ & Max strangers sampled per self-search round (default $5$).\\
+$\omega$ & $(0,1)$ & EWMA recency weight for satisfaction (default $0.2$).\\
+$\rho$ & $[0,1]$ & Quality--interaction mixing weight (default $0.5$).\\
+$\delta$ & $[0,1]$ & Regime-gain strength (default $0.5$).\\
+$\sigma_x$ & $\R_{>0}$ & Type-curve noise scale (default $0.5$).\\
+$\sigma_\varepsilon$ & $\R_{\ge 0}$ & Per-match output noise SD (default $0.10$).\\
+$\lambda_c$ & $[0,1]$ & Shared search-cost rate (default $0.15$).\\
+$Q$ & $\R$ & Constant DGP offset (default $1.0$).\\
+$r$ & $\R$ & Outside option (calibrated: $r = 0.60\,\bar q_{\text{cal}}$).\\
+$\phi, c_s$ & $\R_{\ge 0}$ & Broker fee per standard placement; self-search cost per demanded slot.\\
+$\bar q_{\text{cal}}$ & $\R$ & Monte-Carlo mean match output used for calibration.\\
+$\mathbf{x}_i$ & Unit sphere $S^{d-1}\subset\R^{d}$ & Type vector of agent $i$ (fixed at entry).\\
+$\mathbf{c}$ & $\R^{d}$ & Ideal-type vector (general-quality direction).\\
+$\mathbf{A}$ & $\R^{d\times d}$, SPD & Bilinear interaction operator.\\
+$\mathbf{B}$ & $\R^{d\times d}$, symmetric & Regime-boundary operator (unit Frobenius, $\Sx$-orthogonal to $\A$).\\
+$\Sx$ & $\R^{d\times d}$ & Empirical type second moment $\Ntot^{-1}\sum_i \x_i\x_i^\top$.\\
+$f_k, \theta_k$ & $\{1,..,5\}$; $[0,2\pi)$ & Curve frequency and phase per active dimension.\\
+$G^t$ & Graph on $\Ntot{+}1$ nodes & Undirected match/roster graph at period $t$.\\
+$M_i^t$ & Multiset of agents, $|M_i^t|\le K$ & Agent $i$'s current-period matches.\\
+$\Hist_i^t$ & Multiset of $(\x_j,q_{ij})$ pairs & Agent $i$'s experience history.\\
+$\Hist_b^t$ & Multiset of $(\x_i,\x_j,q_{ij})$ triples & Broker's experience history.\\
+$\Roster^t$ & Subset of $\{1,..,\Ntot\}$, $|\Roster^t|\le R^*$ & Standing broker roster.\\
+$D^t$ & Subset of $\{1,..,\Ntot\}$ & Current-period broker clients.\\
+$A^t$ & $\Roster^t\cup D^t$ & Broker's accessible counterparty set.\\
+$s_{i,c}^t$ & $\R$, $c\in\{\self,\brk\}$ & Agent $i$'s EWMA satisfaction per channel.\\
+$\rep_b^t$ & $\R$ & Broker reputation (mean client satisfaction).\\
+$d_i$ & $\{0,\ldots,K\}$ & Agent $i$'s current-period demand count.\\
+$u_i^{\ell}$ & $\{0,\ldots,d_i\}$ & Remaining unfilled demand after within-period round $\ell$.\\
+$q_{ij}$ & $\R$ & Realized match output for pairing $(i,j)$.\\
+$\bar q_{ij}$ & $\R$ & Empirical mean of prior realized $q$ between $i$ and $j$.\\
+$\qhat_i(\x_j)$ & $\R$ & Agent $i$'s predicted $q$ for partner with type $\x_j$.\\
+$\qhat_b([\x_i;\x_j])$ & $\R$ & Broker's predicted $q$ for pairing $(i,j)$.\\
+$\mathbf{W}_1,\mathbf{b}_1,\mathbf{w}_2,b_2$ & Network weights & One-hidden-layer ReLU MLP parameters.\\
+$h_a, h_b$ & $\mathbb{N}$ & Hidden widths for agents; broker (default $16,32$).\\
+$\eta_{lr}, E_{\text{init}}, W$ & $\R_{>0}, \mathbb{N}, \mathbb{N}$ & Learning rate; initial training steps; sliding window (default $0.03,200,500$).\\
+\end{longtable}}
+
+\section{Agents and the Type Curve}\label{sec:types}
+
+Each agent $i$ carries a fixed observable \emph{type vector} $\x_i \in S^{d-1}\subset\R^d$. Types are drawn so as to lie near a smooth one-dimensional curve on the unit sphere of $\R^d$. Concretely, let $s\le d$ be the number of active dimensions and draw once per simulation $f_k\overset{\text{iid}}{\sim}U\{1,2,3,4,5\}$ and $\theta_k\overset{\text{iid}}{\sim}U[0,2\pi)$ for $k=1,\ldots,s$. Define the curve
+\begin{equation}
+\tilde{x}_k(t) =
+\begin{cases}
+\sin(2\pi f_k t + \theta_k) & k=1,\ldots,s\\
+0 & k=s+1,\ldots,d
+\end{cases},\qquad
+\x(t) = \tilde{\x}(t)/\|\tilde{\x}(t)\|,\qquad t \in [0,1].
+\label{eq:curve}
+\end{equation}
+For every agent draw a curve position $t_i \sim U[0,1]$ and a perturbation $\boldsymbol\epsilon_i \sim \mathcal{N}\bigl(\mathbf{0},\tfrac{\sigma_x^2}{d}\mathbf{I}_d\bigr)$, then set
+\begin{equation}
+\x_i \;=\; \frac{\x(t_i) + \boldsymbol\epsilon_i}{\|\x(t_i) + \boldsymbol\epsilon_i\|}.
+\label{eq:agent-type}
+\end{equation}
+The per-dimension noise scale $\sigma_x/\sqrt{d}$ makes the expected Euclidean distance between $\x_i$ and $\x(t_i)$ approximately $\sigma_x$, independent of $d$. When $s=d$ the curve spans all of $\R^d$; when $s<d$ it lies in a lower-dimensional subspace and the remaining dimensions carry only noise. The parameter $s$ therefore controls the intrinsic dimensionality of the type manifold.
+
+Each agent additionally carries: a list $M_i^t$ of current-period matches with $|M_i^t|\le K$ (same partner allowed multiple times), an experience history $\Hist_i^t$ of $(\x_j,q_{ij})$ observations from every match $i$ has participated in regardless of role, and per-channel satisfaction states $s_{i,\self}^t,\, s_{i,\brk}^t \in \R$. Available capacity is $K-|M_i^t|$.
+
+\section{Matching Function (Data-Generating Process)}\label{sec:matching}
+
+Match quality is a symmetric function of the two types plus Gaussian noise:
+\begin{equation}
+q_{ij} \;=\; Q + f(\x_i,\x_j) + \varepsilon_{ij},\qquad \varepsilon_{ij}\sim\mathcal{N}(0,\sigma_\varepsilon^2).
+\label{eq:match-output}
+\end{equation}
+The constant $Q=1.0$ shifts $q$ into a range where fees and surpluses are well-defined, and $\sigma_\varepsilon=0.10$ represents irreducible idiosyncratic variation. The deterministic component decomposes as
+\begin{equation}
+f(\x_i,\x_j) \;=\; \rho\cdot\tfrac{1}{2}\bigl[\x_i^\top\mathbf{c} + \x_j^\top\mathbf{c}\bigr] \;+\; (1-\rho)\cdot g(\x_i,\x_j)\,\x_i^\top\A\x_j,
+\label{eq:f}
+\end{equation}
+where
+\begin{equation}
+g(\x_i,\x_j) \;=\; 1 + \delta\cdot\mathrm{sign}\!\bigl(\x_i^\top \B\x_j\bigr)
+\label{eq:gain}
+\end{equation}
+is a regime-dependent gain taking the value $1+\delta$ in the high-gain regime and $1-\delta$ in the low-gain regime. Because $\A$ and $\B$ are symmetric, both $g$ and $f$ are symmetric in their arguments.
+
+\paragraph{General-quality direction $\mathbf{c}$.} Drawn at initialization as a perturbed random point on the same curve \cref{eq:curve}, using the same noise scale $\sigma_x/\sqrt d$. The projection $\x^\top\mathbf{c}$ rewards types aligned with $\mathbf{c}$ and penalizes types pointing elsewhere.
+
+\paragraph{Interaction operator $\A$.} Drawn as $\A = \mathbf{M}_A^\top\mathbf{M}_A\cdot d/\tr(\mathbf{M}_A^\top\mathbf{M}_A)$, where $\mathbf{M}_A \in \R^{d\times d}$ has iid $\mathcal{N}(0,1)$ entries. $\A$ is SPD and trace-normalized so that $\tr(\A)=d$, hence $\mathbb{E}[\x^\top\A\x]=1$ for an isotropically random unit vector $\x$.
+
+\paragraph{Regime operator $\B$.} Drawn after agent types have been realized so that the empirical second moment
+\begin{equation}
+\Sx \;=\; \frac{1}{\Ntot}\sum_{i=1}^{\Ntot}\x_i\x_i^\top \;\in\;\R^{d\times d}
+\label{eq:Sx}
+\end{equation}
+is known. Draw a symmetric Gaussian matrix $\mathbf{H}$, recenter to zero trace, and remove its $\Sx$-weighted projection onto $\A$ under the bilinear form $\langle \mathbf{M},\mathbf{N}\rangle_{\Sx} = \tr(\Sx\mathbf{M}\Sx\mathbf{N})$:
+\begin{equation}
+\B_{\text{raw}} \;=\; \mathbf{H} \;-\; \frac{\tr(\Sx\mathbf{H}\Sx\A)}{\tr(\Sx\A\Sx\A)}\,\A,\qquad
+\B \;=\; \B_{\text{raw}}\big/\|\B_{\text{raw}}\|_F.
+\label{eq:B}
+\end{equation}
+$\B$ is symmetric (generically indefinite) and unit-Frobenius; only $\mathrm{sign}(\x_i^\top \B\x_j)$ matters for the regime assignment. The $\Sx$-orthogonality $\tr(\Sx\B\Sx\A)=0$ ensures that the regime boundary is not aligned with the payoff operator under the realized type distribution, so regime and base-interaction rankings are decoupled.
+
+\paragraph{Why the regime creates an information gap.} For fixed $\x_i$, the function $\x_j\mapsto q_{ij}$ is a mixture of two linear functions of $\x_j$ with slopes $(1\pm\delta)\A\x_i$ separated by the hyperplane $\B\x_i\cdot\x_j = 0$ that depends on $\x_i$. An agent learning only from its own matches cannot separate the two regimes using a single-type regressor, whereas a broker observing $(\x_i,\x_j,q_{ij})$ triples with varying $\x_i$ can resolve the regime boundary from cross-agent variation. This is the fundamental (not merely statistical) informational asymmetry that the model is designed to study.
+
+\section{Prediction Models}\label{sec:nn}
+
+Both agents and the broker use a one-hidden-layer MLP with ReLU activations:
+\begin{equation}
+\qhat(\mathbf{z}) \;=\; \mathbf{w}_2^\top\mathrm{ReLU}(\mathbf{W}_1\mathbf{z} + \mathbf{b}_1) + b_2.
+\label{eq:nn}
+\end{equation}
+For agents, the input is a partner type $\mathbf{z}=\x_j\in\R^{d}$, the hidden width is $h_a=16$, and the network is denoted $\qhat_i$. For the broker the input is the concatenation $\mathbf{z}=[\x_i;\x_j]\in\R^{2d}$, the hidden width is $h_b=32$, and the network is $\qhat_b$. Total parameter counts (with default $d=8$) are $161$ and $577$, respectively.
+
+\paragraph{Training.} Each period the weights are updated by minimizing mean-squared error via full-batch vanilla gradient descent at learning rate $\eta_{lr}=0.03$. No explicit regularization is used. Each network is warm-started from the previous period's weights and run for
+\begin{equation}
+E_t \;=\; \max\!\Bigl(50,\; \bigl\lceil E_{\text{init}}\cdot n_{\text{new}}/n_{\text{total}}\bigr\rceil\Bigr)
+\label{eq:adaptive-steps}
+\end{equation}
+gradient steps, where $n_{\text{new}}$ is the number of observations added this period and $n_{\text{total}}=|\Hist^t|$ is the current history size. Training uses the $W=500$ most recent observations as a sliding window.
+
+\paragraph{Broker symmetry augmentation.} For each triple $(\x_i,\x_j,q_{ij})\in\Hist_b$ the broker trains on both orderings $[\x_i;\x_j]$ and $[\x_j;\x_i]$ with target $q_{ij}$, which doubles the effective training set and enforces input-slot interchangeability.
+
+\paragraph{Initialization.} At $t=0$ each network is trained from He-initialized weights for $E_{\text{init}}=200$ steps on its seed history. The output bias $b_2$ is initialized to $Q$ rather than $0$ so untrained networks predict population-mean match quality.
+
+\paragraph{Parity schedule.} In production periods, agent $i$ retrains only when $i\bmod 2 = t\bmod 2$. Agents not selected in period $t$ keep accumulating $n_{\text{new}}$ and retrain next period. The broker retrains every period.
+
+\section{Match Economics}\label{sec:economics}
+
+\paragraph{Outside option.} All agents share a common reservation
+\begin{equation}
+r \;=\; 0.60\cdot\bar q_{\text{cal}},
+\label{eq:outside}
+\end{equation}
+where $\bar q_{\text{cal}}$ is the Monte-Carlo mean of $q_{ij}$ over $10{,}000$ random pairs $(i,j)\in\{1,\ldots,\Ntot\}^2$ drawn independently and uniformly at initialization. A match forms only if both sides predict positive gains relative to $r$:
+\begin{equation}
+\qhat_i(\x_j) > r\quad\text{and}\quad \qhat_j(\x_i) > r.
+\label{eq:participation}
+\end{equation}
+In broker-mediated matching the demander-side test is replaced by $\qhat_b([\x_i;\x_j])>r$; the counterparty still evaluates using its own model.
+
+\paragraph{Frictions.} The model uses a single calibrated friction level
+\begin{equation}
+\phi \;=\; c_s \;=\; \lambda_c\,(\bar q_{\text{cal}} - r).
+\label{eq:frictions}
+\end{equation}
+The two labels differ only in how they enter realized payoffs: $c_s$ is charged on every demanded slot routed through self-search, regardless of fill; $\phi$ is charged only on \emph{successful} standard brokered placements. This preserves the empirical \emph{search-risk transfer} asymmetry between channels without requiring different magnitudes.
+
+\section{Network Structure and Turnover}\label{sec:network}
+
+\paragraph{Initialization.} $G^0$ is a Watts--Strogatz small-world graph \cite{wattsstrogatz1998}: agents are placed in random order on a ring, each connected to its $k=6$ nearest neighbors, and each edge is rewired to a uniformly random target with probability $p_{\text{rewire}}=0.1$. The random ring order makes the initial graph non-assortative in type. The broker is added as a permanent node and attached to every roster member (see \cref{sec:roster}). The broker has no type vector and is never a matching candidate, but it is included in network metrics.
+
+\paragraph{Match tie formation.} Every accepted match that is not principal (i.e., every match in the base model) adds an undirected edge between $i$ and $j$ in $G^t$ if none exists. Ties persist for as long as both endpoints are in the population.
+
+\paragraph{Turnover.} At the end of each period, each agent independently exits with probability $\eta$ (default $0.02$, giving expected lifetime $50$ quarters). An exiting agent's node, edges, active matches, roster membership, and client status are removed. Each exit is replaced by an entrant with a fresh type from \cref{eq:agent-type}, empty $\Hist$ and $M$, initial self-satisfaction equal to the mean of its new neighbors' self-satisfaction (word-of-mouth), initial broker-satisfaction equal to the current $\rep_b^t$, and $\lfloor k/2\rfloor$ edges to agents sampled with probability proportional to $\exp(-\|\x_{i'}-\x_j\|^2)$ (type-similar neighbors).
+
+\section{Search}\label{sec:search}
+
+At period start, every slot is open. Each of an agent's $K$ slots independently generates demand with probability $p_{\text{demand}}$, so
+\begin{equation}
+d_i \;\sim\; \mathrm{Binomial}(K,\,p_{\text{demand}}).
+\label{eq:demand}
+\end{equation}
+If $d_i>0$, agent $i$ chooses \emph{one} channel for its entire batch (\cref{sec:outsourcing}). The chosen channel then attempts to fill the batch through a sequence of at most $R_{\max}=\max_i d_i \le K$ within-period \emph{rounds}. Let $u_i^0 = d_i$. In round $\ell$, every still-active demander with $u_i^{\ell-1}>0$ is given exactly one attempt at filling one additional slot; on success, $u_i^\ell = u_i^{\ell-1}-1$.
+
+\subsection{Self-search candidate set}\label{sec:selfsearch}
+
+For an agent $i$ whose channel choice is self-search, round $\ell$'s candidate pool has two components:
+
+\paragraph{Known neighbors.} Any graph neighbor $j\in N_{G^t}(i)$ with spare capacity \emph{and} at least one prior realized match with $i$. For such $j$, agent $i$'s demander-side evaluation is the empirical mean
+\begin{equation}
+\bar q_{ij} \;=\; \frac{1}{n_{ij}}\sum_{m=1}^{n_{ij}} q_{ij}^{(m)},
+\label{eq:partner-mean}
+\end{equation}
+where $n_{ij}$ is the number of prior matches between $i$ and $j$. Neighbors without any stored $(\cdot,q_{ij}^{(m)})$ record are omitted; they are not reclassified as strangers.
+
+\paragraph{Strangers.} Up to $n_s=5$ agents drawn uniformly without replacement from $\{1,\ldots,\Ntot\}\setminus (N_{G^t}(i)\cup\{i,b\})$ restricted to those with spare capacity. The agent has no empirical record for a stranger $j$, so its demander-side evaluation is the network prediction $\qhat_i(\x_j)$.
+
+Candidates whose demander-side evaluation does not exceed $r$ are dropped. The remaining feasible set is ordered from best to worst.
+
+\subsection{Broker-mediated search}\label{sec:brokersearch}
+
+If agent $i$ outsources, it is added to the one-period client set $D^t$. After all outsourcing decisions in period $t$ are known, the broker forms its accessible counterparty set
+\begin{equation}
+A^t \;=\; \Roster^t \cup D^t.
+\label{eq:At}
+\end{equation}
+In each round, the broker considers the subset of $A^t$ with spare capacity. For every active broker client $i$ and feasible $j\in A^t$ with $j\neq i$, the broker computes $\qhat_b([\x_i;\x_j])$, drops candidates with evaluation $\le r$, and builds a per-demander best-to-worst ranked list for the round.
+
+\subsection{Within-round deferred acceptance}\label{sec:da}
+
+Within a round, all still-active demanders attempt to fill one slot through a decentralized deferred-acceptance protocol with capacity:
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+\item Each active demander proposes to its highest-ranked feasible candidate not yet rejected in this round.
+\item Each counterparty $j$ evaluates its incoming offers using its own rule: empirical $\bar q_{ji}$ for previously matched offerers, $\qhat_j(\x_i)$ for strangers. Offers with evaluation $\le r$ are rejected outright.
+\item $j$ tentatively holds up to its current spare capacity's worth of surviving offers, ranked by its own evaluation; lower-ranked incoming offers are rejected.
+\item If an agent has just obtained a tentative demander-side hold while also holding incoming counterparty offers, release its lowest-ranked incoming hold as needed so total tentative commitments do not exceed current spare capacity.
+\item Rejected demanders immediately propose to their next-best feasible candidate within the same round; steps 2--4 repeat until no rejected demander has any candidate left.
+\item Any demander whose feasible list is exhausted without a tentative hold fails for the remainder of the period and makes no further proposals in later rounds.
+\end{enumerate}
+
+At round end, all tentative holds are finalized: outputs are drawn via \cref{eq:match-output}, histories update immediately, and each standard match adds an edge to $G^t$. The period terminates when $u_i^{\ell}=0$ for all demanders, when a round produces zero accepted matches, or when no unfilled demander has any feasible candidate.
+
+\section{Outsourcing Decision}\label{sec:outsourcing}
+
+\paragraph{Satisfaction indices.} Each agent maintains an EWMA per channel $c\in\{\self,\brk\}$:
+\begin{equation}
+s_{i,c}^{t+1} \;=\; (1-\omega)\,s_{i,c}^{t} + \omega\,\tilde q_{i,c}^{\,t},
+\label{eq:ewma}
+\end{equation}
+with $\omega=0.2$. The update is applied only on the channel actually used in period $t$. The input $\tilde q$ is the per-demanded-slot net value and is therefore sensitive to partial fill:
+\begin{align}
+\tilde q_{i,\self}^{\,t} &= \frac{1}{d_i}\!\!\sum_{\text{accepted self-matches}}\!\!q_{ij} \;-\; c_s,\label{eq:qtilde-self}\\
+\tilde q_{i,\brk}^{\,t}  &= \frac{1}{d_i}\!\!\sum_{\text{accepted brokered matches}}\!\!(q_{ij} - \phi).\label{eq:qtilde-brk}
+\end{align}
+Unfilled slots contribute zero output. A total-failure self-search batch yields $\tilde q = -c_s$; a total-failure brokered batch yields $\tilde q = 0$. Satisfaction indices are not floored and can go negative. The EWMA recovers within a few good observations.
+
+\paragraph{Decision rule.} An agent with $d_i>0$ compares
+\begin{equation}
+\text{score}_\self \;=\; s_{i,\self}^t,\qquad
+\text{score}_\brk \;=\;
+\begin{cases}
+s_{i,\brk}^t & \text{if agent has ever tried the broker,}\\
+\rep_b^t & \text{otherwise.}
+\end{cases}
+\label{eq:scores}
+\end{equation}
+Agent $i$ outsources iff $\text{score}_\brk > \text{score}_\self$; it self-searches iff $\text{score}_\brk < \text{score}_\self$; at equality the channel is chosen by a fair coin flip. The \emph{tried-broker} flag flips to true the first time the broker is chosen, whether or not any match resulted.
+
+\paragraph{Broker reputation.} The broker's reputation is the mean broker-satisfaction across current clients:
+\begin{equation}
+\rep_b^{t+1} \;=\;
+\begin{cases}
+|D^t|^{-1}\sum_{i\in D^t} s_{i,\brk}^{t+1} & D^t\neq\emptyset,\\
+\rep_b^{t} & D^t=\emptyset.
+\end{cases}
+\label{eq:rep}
+\end{equation}
+
+\section{Broker Roster}\label{sec:roster}
+
+The broker maintains a standing \emph{roster} $\Roster^t\subset\{1,\ldots,\Ntot\}$ of size target $R^* = \lceil\alpha_R\Ntot\rceil$ (default $200$ at $\Ntot=1000$). The roster is seeded at initialization by a uniform random draw. Each period, after prior-period matches are cleared, each current roster member independently churns out with probability $p_{\text{roster}}=0.02$, then the broker replenishes by sampling without replacement from $\{1,\ldots,\Ntot\}\setminus\Roster^t$ until size $R^*$ is restored. Formally, with $u_i^t \overset{\text{iid}}{\sim} U[0,1]$,
+\begin{equation}
+\widetilde{\Roster}^t \;=\; \{i\in \Roster^{t-1}:\ u_i^t > p_{\text{roster}}\},
+\label{eq:roster-churn}
+\end{equation}
+then $\Roster^t$ is obtained by appending uniformly random non-roster agents until $|\Roster^t|=R^*$ (or the population is exhausted). Broker-agent edges in $G^t$ are synchronized to $\Roster^t\cup D^t\cup\{\text{agents currently engaged in broker-channel matches}\}$. Standing-roster membership is independent of current outsourcing status.
+
+\section{Match Lifecycle}\label{sec:lifecycle}
+
+A match is \emph{transactional within a period}. When a round finalizes an accepted match $(i,j)$:
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+\item Draw $q_{ij} = Q + f(\x_i,\x_j) + \varepsilon_{ij}$, $\varepsilon_{ij}\sim\mathcal{N}(0,\sigma_\varepsilon^2)$.
+\item Append $(\x_j,q_{ij})$ to $\Hist_i$ and $(\x_i,q_{ij})$ to $\Hist_j$. If the match was brokered, also append $(\x_i,\x_j,q_{ij})$ to $\Hist_b$.
+\item Append $j$ to $M_i^t$ and $i$ to $M_j^t$.
+\item Add an edge $(i,j)$ to $G^t$ if not already present.
+\end{enumerate}
+Between periods, every $M_i^{t}$ is cleared so all $K$ slots reopen. Edges in $G^t$ persist until a node exits.
+
+\section{Performance Measures}\label{sec:measures}
+
+These quantities are outputs for analysis only; no agent uses them in decisions.
+
+\paragraph{Network measures (every $M=20$ periods on $G^t$).}
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+\item Betweenness centrality \cite{brandes2001}:
+\[
+C_B(b) = \frac{1}{(n-1)(n-2)}\sum_{s\neq b}\sum_{t\neq s}\frac{\sigma_{st}(b)}{\sigma_{st}},\qquad n=\Ntot+1.
+\]
+\item Burt's constraint on the broker's ego network:
+\[
+C_b = \sum_{j\in N(b)}\Bigl(p_{bj} + \!\!\!\sum_{h\neq b,j}\!\!\! p_{bh}\,p_{hj}\Bigr)^{\!2},
+\]
+with $p_{bj}=1/d_b$ and $p_{kj}=1/d_k$ for indirect terms.
+\item Borgatti's effective size:\ $\mathrm{ES}_b = d_b - 2t_b/d_b$, where $t_b$ counts ties among $b$'s neighbors.
+\end{itemize}
+
+\paragraph{Prediction quality (every period).} Let $\mathrm{MSE}, \mathrm{SST}$ refer to an evaluation sample.
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+\item \emph{Holdout $R^2$}: sample $100$ non-entrant agents; for each, draw $40$ random partners; both $\qhat_i$ and $\qhat_b$ predict the noiseless $f(\x_i,\x_j)$. Report $1-\mathrm{SSE}/\mathrm{SST}$ per-agent, then average.
+\item \emph{Selected $R^2$, bias, Spearman $\rho_S$}: computed over all accepted matches per channel. Positive bias is the winner's curse signature.
+\item \emph{Variance-gate:} when the sample $\mathrm{Var}(q) < \sigma_\varepsilon^2/6$, all three selected metrics are set to NaN.
+\end{itemize}
+
+\paragraph{Other diagnostics (every period).} Match quality by channel $\bar q_\self^t, \bar q_{\brk}^t$; slot-level outsourcing rate; mean cross-agent $s_{i,\self}^t$ and $s_{i,\brk}^t$; $|\Roster^t|$; $|A^t|$; number of agents with spare capacity. For each brokered match, a binary \emph{access vs.\ assessment} flag recording whether $j \in N_{G^t}(i)$ at match time.
+
+\section{Parameters, Defaults, and Calibration}\label{sec:params}
+
+\Cref{tab:struct} collects the structural constants and calibration parameters used by the base model; phase-diagram axes and one-at-a-time sensitivity sweeps are listed in \cref{tab:sweeps}.
+
+\begin{table}[h]
+\centering
+\caption{Structural constants and calibration parameters used in the base model.}\label{tab:struct}
+\small
+\begin{tabular}{@{}llp{0.55\linewidth}@{}}
+\toprule
+\textbf{Symbol} & \textbf{Default} & \textbf{Role}\\
+\midrule
+$\Ntot$ & $1000$ & Agent population.\\
+$T$ / $T_{\text{burn}}$ & $200$ / $30$ & Total periods / burn-in discarded.\\
+$d$ & $8$ & Type dimensionality.\\
+$s$ & $8$ & Active dimensions of the type curve.\\
+$k$ & $6$ & Watts--Strogatz ring-lattice degree.\\
+$p_{\text{rewire}}$ & $0.1$ & Watts--Strogatz rewiring prob.\\
+$p_{\text{demand}}$ & $0.50$ & Per-slot demand prob.\\
+$K$ & $5$ & Per-agent capacity.\\
+$\eta$ & $0.02$ & Per-period agent exit prob.\\
+$\alpha_R$, $p_{\text{roster}}$ & $0.20$, $0.02$ & Roster target share, roster churn prob.\\
+$n_s$ & $5$ & Max strangers per self-search round.\\
+$\omega$ & $0.2$ & EWMA recency weight.\\
+$\rho$, $\delta$ & $0.50$, $0.5$ & Mixing weight, regime-gain strength.\\
+$\sigma_x$, $\sigma_\varepsilon$ & $0.5$, $0.10$ & Type / match-output noise.\\
+$\lambda_c$ & $0.15$ & Shared search-cost rate.\\
+$r$ & $0.60\,\bar q_{\text{cal}}$ & Outside option.\\
+$\phi$, $c_s$ & $\lambda_c(\bar q_{\text{cal}}-r)$ & Placement fee; self-search cost per slot.\\
+$\eta_{lr}$ & $0.03$ & GD learning rate.\\
+$E_{\text{init}}$, $W$ & $200$, $500$ & Initial training steps; sliding window.\\
+$h_a$, $h_b$ & $16$, $32$ & MLP hidden widths.\\
+$b_2^{(0)}$ & $Q$ & Initial output bias.\\
+$M$ & $20$ & Network-measure interval.\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[h]
+\centering
+\caption{Phase-diagram axes and one-at-a-time sensitivity sweeps.}\label{tab:sweeps}
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Symbol} & \textbf{Default} & \textbf{Sweep}\\
+\midrule
+$s$ & $8$ & $\{2,4,6,8\}$\\
+$\rho$ & $0.50$ & $\{0,0.10,0.30,0.50,0.70,0.90,1.0\}$\\
+$K$ & $5$ & $\{1,2,5,10,20,50\}$\\
+$p_{\text{demand}}$ & $0.50$ & $\{0.10,0.25,0.50,0.75,0.90\}$\\
+$\eta$ & $0.02$ & $\{0.01,0.02,0.05,0.10\}$\\
+$\delta$ & $0.5$ & $\{0,0.25,0.50,0.75\}$\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Reproducibility.} All randomness flows from a single integer seed, which determines the type draws, the realization of $G^0$, the matching-function matrices $(\mathbf{c},\A,\B)$, the broker seed roster and history, and every subsequent random event. A simulation is fully reproducible given (parameter dictionary, seed).
+
+\section{Simulation Pseudocode}\label{sec:pseudo}
+
+The simulation consists of an initialization routine (\cref{alg:init}), a per-period update (\cref{alg:step}), a round-level within-period routine (\cref{alg:round}), and the top-level driver (\cref{alg:main}).
+
+\begin{algorithm}[H]
+\caption{\textsc{Initialize}$(\Theta,\text{seed})\to\mathcal{S}_0$. $\Theta$ is the full parameter dictionary.}\label{alg:init}
+\begin{algorithmic}[1]
+\STATE Seed RNG with \textit{seed}.
+\STATE Draw curve frequencies $f_k\sim U\{1,\ldots,5\}$ and phases $\theta_k\sim U[0,2\pi)$ for $k=1,\ldots,s$; fill $f_k=\theta_k=0$ for $k>s$.
+\FORALL{$i\in\{1,\ldots,\Ntot\}$}
+  \STATE Draw $t_i\sim U[0,1]$ and $\boldsymbol\epsilon_i\sim\mathcal{N}(\mathbf{0},(\sigma_x^2/d)\mathbf{I}_d)$; set $\x_i$ by \cref{eq:agent-type}.
+\ENDFOR
+\STATE Compute $\Sx \gets \Ntot^{-1}\sum_i \x_i\x_i^\top$.
+\STATE Draw ideal type $\mathbf{c}$: sample $t_c\sim U[0,1]$, $\boldsymbol\epsilon_c\sim\mathcal{N}(\mathbf{0},(\sigma_x^2/d)\mathbf{I}_d)$; $\mathbf{c}\gets\x(t_c)+\boldsymbol\epsilon_c$.
+\STATE Draw $\mathbf{M}_A\in\R^{d\times d}$ iid $\mathcal{N}(0,1)$; set $\A\gets \mathbf{M}_A^\top\mathbf{M}_A\cdot d/\tr(\mathbf{M}_A^\top\mathbf{M}_A)$.
+\STATE Draw symmetric Gaussian $\mathbf{H}$, recenter trace to $0$, compute $\B$ by \cref{eq:B}.
+\STATE \COMMENT{Calibration}
+\STATE Draw $10{,}000$ pairs $(i,j)\in\{1,\ldots,\Ntot\}^2$ iid uniformly (self-pairs allowed); compute $\bar q_{\text{cal}}\gets\mathbb{E}[Q+f(\x_i,\x_j)]$ from sample mean.
+\STATE $r\gets 0.60\,\bar q_{\text{cal}};\quad \phi\gets c_s\gets \lambda_c(\bar q_{\text{cal}}-r)$.
+\STATE \COMMENT{Network}
+\STATE Build $G^0$ as Watts--Strogatz$(\Ntot,k,p_{\text{rewire}})$ with random ring order. Add broker node $b$.
+\STATE \COMMENT{Broker roster and history}
+\STATE $\Roster^0\gets$ uniform random subset of $\{1,\ldots,\Ntot\}$ of size $R^*=\lceil\alpha_R\Ntot\rceil$.
+\STATE Add edge $(b,j)$ to $G^0$ for every $j\in\Roster^0$.
+\STATE $\Hist_b\gets\emptyset$.
+\FOR{$m=1$ \TO $100$}
+  \STATE Sample $(i,j)$ uniformly from $\Roster^0$ with $i\neq j$.
+  \STATE Realize $q_{ij}$ by \cref{eq:match-output}.
+  \STATE Append $(\x_i,\x_j,q_{ij})$ to $\Hist_b$; add edge $(i,j)$ to $G^0$ if absent.
+\ENDFOR
+\STATE \COMMENT{Agent states and seed histories}
+\FORALL{$i\in\{1,\ldots,\Ntot\}$}
+  \STATE $M_i^0\gets\emptyset$. Set $\Hist_i\gets\emptyset$.
+  \STATE Sample $5$ neighbors $j$ from $N_{G^0}(i)\setminus\{b\}$ (with replacement if the neighborhood is small).
+  \FORALL{sampled $j$}
+    \STATE Realize $q_{ij}$ by \cref{eq:match-output}; append $(\x_j,q_{ij})$ to $\Hist_i$.
+  \ENDFOR
+  \STATE $s_{i,\self}^0 \gets$ mean of $q_{ij}$ in $\Hist_i$.
+\ENDFOR
+\STATE $\rep_b^0 \gets$ mean $q$ across $\Hist_b$.
+\STATE $s_{i,\brk}^0 \gets \rep_b^0$ for every $i$; set \emph{tried-broker}$_i\gets\textsc{false}$.
+\STATE \COMMENT{Neural-network warm-up}
+\FORALL{$i\in\{1,\ldots,\Ntot\}$}
+  \STATE Initialize $\qhat_i$ with He-init weights; $b_2\gets Q$. Train for $E_{\text{init}}$ GD steps on $\Hist_i$.
+\ENDFOR
+\STATE Initialize $\qhat_b$ (He-init; $b_2\gets Q$). Train for $E_{\text{init}}$ GD steps on the symmetry-augmented $\Hist_b$.
+\RETURN initial state $\mathcal{S}_0$.
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{\textsc{Period}$(\mathcal{S}_{t-1},t)\to\mathcal{S}_t$. One full period of the base model.}\label{alg:step}
+\begin{algorithmic}[1]
+\STATE \COMMENT{Step 0: match reset and roster refresh}
+\FORALL{$i\in\{1,\ldots,\Ntot\}$}
+  \STATE $M_i^t\gets\emptyset$.
+\ENDFOR
+\STATE Clear $D^{t-1}$.
+\STATE Each $j\in\Roster^{t-1}$ drops out independently with prob.\ $p_{\text{roster}}$, giving $\widetilde{\Roster}^t$; replenish uniformly without replacement from $\{1,\ldots,\Ntot\}\setminus\widetilde{\Roster}^t$ until $|\Roster^t|=R^*$.
+\STATE Synchronize broker-edges in $G^t$ so $N_{G^t}(b)=\Roster^t$.
+\STATE \COMMENT{Step 1: demand and outsourcing}
+\FORALL{$i\in\{1,\ldots,\Ntot\}$}
+  \STATE $d_i\sim\mathrm{Binomial}(K,p_{\text{demand}})$.
+  \IF{$d_i>0$}
+    \STATE Compute $\text{score}_\self, \text{score}_\brk$ by \cref{eq:scores}.
+    \STATE $\text{decision}_i\gets\brk$ if $\text{score}_\brk>\text{score}_\self$; $\self$ if $\text{score}_\brk<\text{score}_\self$; fair coin on equality.
+    \IF{$\text{decision}_i=\brk$} \STATE \emph{tried-broker}$_i\gets\textsc{true}$. \ENDIF
+  \ENDIF
+\ENDFOR
+\STATE $D^t\gets\{i:d_i>0\wedge\text{decision}_i=\brk\}$.
+\STATE Synchronize broker-edges in $G^t$ to $\Roster^t\cup D^t$.
+\STATE $A^t\gets\Roster^t\cup D^t$.
+\STATE \COMMENT{Step 2: fit prediction models}
+\FORALL{$i\in\{1,\ldots,\Ntot\}$ with $i\bmod 2 = t\bmod 2$}
+  \STATE Update $\qhat_i$ from warm start by GD: $E_t$ steps on the latest $W$ observations of $\Hist_i$, with $E_t=\max(50,\lceil E_{\text{init}}\cdot n_{\text{new}}/n_{\text{total}}\rceil)$.
+\ENDFOR
+\STATE Update $\qhat_b$ on the symmetry-augmented latest $W$ observations of $\Hist_b$ with the same $E_t$ rule.
+\STATE \COMMENT{Step 3: within-period matching}
+\STATE $u_i^0\gets d_i$ for every $i$; $\ell\gets 1$.
+\STATE Call \textsc{WithinPeriodRounds}$(t,\{d_i\},\{\text{decision}_i\},A^t)$ (\cref{alg:round}).
+\STATE \COMMENT{Step 4: update satisfactions and reputation}
+\FORALL{$i$ with $d_i>0$}
+  \STATE Let $c=\text{decision}_i$. Compute $\tilde q$ by \cref{eq:qtilde-self} or \cref{eq:qtilde-brk}.
+  \STATE $s_{i,c}^{t+1}\gets(1-\omega)s_{i,c}^t+\omega\tilde q$. Keep the other channel's index unchanged.
+\ENDFOR
+\STATE Update $\rep_b^{t+1}$ by \cref{eq:rep}.
+\STATE \COMMENT{Step 5: entry and exit}
+\FORALL{$i\in\{1,\ldots,\Ntot\}$}
+  \STATE With prob.\ $\eta$: remove $i$ from $G^t$ (node + edges), from $\Roster^t$ and $D^t$ if present, and terminate any active matches of $i$. Replace with entrant $i'$ per \cref{sec:network} (fresh type, empty $\Hist$/$M$, attach $\lfloor k/2\rfloor$ type-similar edges; $s_{i',\self}\gets$ mean neighbor $s_{\cdot,\self}$; $s_{i',\brk}\gets\rep_b^{t+1}$; \emph{tried-broker}$_{i'}\gets\textsc{false}$).
+\ENDFOR
+\STATE \COMMENT{Step 6: record metrics}
+\STATE Record per-period diagnostics (\cref{sec:measures}). Every $M$ periods, recompute network measures on $G^t$.
+\RETURN $\mathcal{S}_t$.
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{\textsc{WithinPeriodRounds}$(t,\{d_i\},\{\text{decision}_i\},A^t)$. Runs at most $R_{\max}\le K$ rounds.}\label{alg:round}
+\begin{algorithmic}[1]
+\STATE Initialize \emph{failed}$_i\gets\textsc{false}$ for all $i$ with $d_i>0$.
+\LOOP
+  \STATE $U^\ell\gets\{i : u_i^{\ell-1}>0 \wedge K-|M_i^t|>0 \wedge\neg\emph{failed}_i\}$.
+  \IF{$U^\ell=\emptyset$}
+    \STATE \textbf{break}
+  \ENDIF
+  \STATE \COMMENT{Build round-specific candidate rankings}
+  \FORALL{$i\in U^\ell$}
+    \IF{$\text{decision}_i=\self$}
+      \STATE Known neighbors: $\{j\in N_{G^t}(i):\ K-|M_j^t|>0,\ \bar q_{ij}$ defined$\}$, evaluated by $\bar q_{ij}$.
+      \STATE Strangers: up to $n_s$ agents drawn uniformly w/o replacement from $\{1,\ldots,\Ntot\}\setminus(N_{G^t}(i)\cup\{i,b\})$ restricted to spare capacity, evaluated by $\qhat_i(\x_j)$.
+      \STATE Drop candidates with demander-side evaluation $\le r$; sort the rest best-to-worst.
+    \ELSIF{$\text{decision}_i=\brk$}
+      \STATE Candidates $=\{j\in A^t:j\neq i \wedge K-|M_j^t|>0\}$, evaluated by $\qhat_b([\x_i;\x_j])$.
+      \STATE Drop candidates with $\qhat_b([\x_i;\x_j])\le r$; sort the rest best-to-worst.
+    \ENDIF
+  \ENDFOR
+  \STATE \COMMENT{Deferred acceptance within this round}
+  \STATE \emph{tentative-hold}$_j\gets\emptyset$ for all $j$ (buffers of incoming offers already tentatively held).
+  \REPEAT
+    \FORALL{$i\in U^\ell$ not holding a tentative demander-side match and with feasible candidates remaining}
+      \STATE $j^*\gets$ $i$'s highest-ranked not-yet-rejected feasible candidate.
+      \IF{no such $j^*$}
+        \STATE \emph{failed}$_i\gets\textsc{true}$; \textbf{continue}.
+      \ENDIF
+      \STATE Propose $(i\to j^*)$.
+    \ENDFOR
+    \FORALL{$j$ with incoming proposals this sub-round}
+      \STATE Evaluate each offer: $\bar q_{ji}$ for known partners, $\qhat_j(\x_i)$ for strangers; reject offers with evaluation $\le r$.
+      \STATE Rank surviving offers by $j$'s own evaluation. Keep up to current spare capacity $K-|M_j^t|-|\emph{tentative-hold}_j|$; reject the rest.
+    \ENDFOR
+    \FORALL{$i$ just granted a tentative demander-side hold while also holding incoming offers}
+      \STATE Release lowest-ranked incoming offers in \emph{tentative-hold}$_i$ until total tentative commitments $\le K-|M_i^t|$.
+    \ENDFOR
+  \UNTIL{no rejected demander has any feasible candidate left to propose to in round $\ell$}
+  \STATE \COMMENT{Finalize accepted matches}
+  \FORALL{accepted pairs $(i,j)$ this round}
+    \STATE Draw $q_{ij}=Q+f(\x_i,\x_j)+\varepsilon_{ij}$ with $\varepsilon_{ij}\sim\mathcal{N}(0,\sigma_\varepsilon^2)$.
+    \STATE Append $(\x_j,q_{ij})$ to $\Hist_i$; update $\bar q_{ij}$. Append $(\x_i,q_{ij})$ to $\Hist_j$; update $\bar q_{ji}$.
+    \IF{channel is broker}
+      \STATE Append $(\x_i,\x_j,q_{ij})$ to $\Hist_b$.
+    \ENDIF
+    \STATE Append $j$ to $M_i^t$ and $i$ to $M_j^t$.
+    \STATE Add edge $(i,j)$ to $G^t$ if absent.
+    \STATE $u_i^\ell\gets u_i^{\ell-1}-1$.
+  \ENDFOR
+  \STATE Synchronize broker-edges in $G^t$ so $b$ is adjacent to $\Roster^t\cup D^t\cup\{\text{agents in active brokered matches}\}$.
+  \IF{no matches accepted in round $\ell$}
+    \STATE \textbf{break}
+  \ENDIF
+  \STATE $\ell\gets\ell+1$.
+\ENDLOOP
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{\textsc{RunSimulation}$(\Theta,\text{seed})$. Top-level driver.}\label{alg:main}
+\begin{algorithmic}[1]
+\STATE $\mathcal{S}_0\gets\textsc{Initialize}(\Theta,\text{seed})$.
+\FOR{$t=1$ \TO $T$}
+  \STATE $\mathcal{S}_t\gets\textsc{Period}(\mathcal{S}_{t-1},t)$.
+\ENDFOR
+\RETURN time series of recorded metrics over $t=T_{\text{burn}}+1,\ldots,T$.
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Complexity note.} Per period, the dominant costs are (i) the $O(\Ntot/2)$ agent-network retrainings, each an $O(E_t\cdot W\cdot h_a\cdot d)$ GD pass; (ii) the broker-network retraining, $O(E_t\cdot W\cdot h_b\cdot d)$; (iii) the within-round self-search candidate builds, $O(\sum_i (|N_{G^t}(i)|+n_s))$ per round; (iv) the within-round broker ranking, $O(|D^t|\cdot|A^t|\cdot d\cdot h_b)$; (v) the deferred-acceptance sub-rounds, bounded by the total number of proposals. Network measures, which are $O(\Ntot^2)$ or worse, are amortized by the interval $M$.
+
+\begin{thebibliography}{9}
+\bibitem[Borgatti(1997)]{borgatti1997} Borgatti, S.P. (1997). Structural holes: Unpacking Burt's redundancy measures. \emph{Connections}, 20(1):35--38.
+\bibitem[Brandes(2001)]{brandes2001} Brandes, U. (2001). A faster algorithm for betweenness centrality. \emph{J.\ Math.\ Sociol.}, 25(2):163--177.
+\bibitem[Brenner(2006)]{brenner2006} Brenner, T. (2006). Agent learning representation: Advice on modelling economic learning. \emph{Handbook of Computational Economics}, 2:895--947.
+\bibitem[Burt(1992)]{burt1992} Burt, R.S. (1992). \emph{Structural Holes: The Social Structure of Competition}. Harvard University Press.
+\bibitem[Freeman(1977)]{freeman1977} Freeman, L.C. (1977). A set of measures of centrality based on betweenness. \emph{Sociometry}, 40(1):35--41.
+\bibitem[Rogerson et al.(2005)]{rogersonshimerwright2005} Rogerson, R., Shimer, R., \& Wright, R. (2005). Search-theoretic models of the labor market: A survey. \emph{J.\ Econ.\ Lit.}, 43(4):959--988.
+\bibitem[Watts \& Strogatz(1998)]{wattsstrogatz1998} Watts, D.J., \& Strogatz, S.H. (1998). Collective dynamics of `small-world' networks. \emph{Nature}, 393:440--442.
+\end{thebibliography}
+
+\end{document}
