@@ -51,6 +51,36 @@ const MISSING_NOTES = joinpath(SUM_ROOT, "missing_plots.md")
 isdir(FIG_ROOT) || mkpath(FIG_ROOT)
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Publication-scale fonts + PDF output
+# Per BROKER_ADVANTAGE_PLOTTING_SPEC.md §3.1–§3.2 and §18 the broker-advantage
+# figures must be PDF sized for A4 at the ~160 mm LaTeX text width, with the
+# font-size floors below. We therefore redefine the figure_style.jl constants
+# (included above) to publication scale for THIS script only.
+# The constant redefinitions warn once at load; the warnings are expected.
+# ─────────────────────────────────────────────────────────────────────────────
+
+const PUB_SUPTITLE_FS = 16
+const PUB_TITLE_FS    = 14
+const PUB_LABEL_FS    = 13
+const PUB_TICK_FS     = 12
+const PUB_LEG_FS      = 12
+const PUB_FOOTER_FS   = 10
+const PUB_ANNOT_FS    = 11   # in-panel text (regime codes, cell labels)
+
+"""Figure size in points for PDF output. CairoMakie uses points 1:1 when saving
+PDF with the default pt_per_unit=1. Sizes match the spec §3.2 table."""
+const SIZE_1x1    = (460, 340)
+const SIZE_2x2    = (460, 420)
+const SIZE_2x3    = (620, 360)
+const SIZE_3x3    = (620, 620)
+const SIZE_4x4    = (760, 760)
+const SIZE_REGIME = (540, 400)     # 1×1 with external legend + footnote
+const SIZE_BARS   = (760, 520)     # anchor × metric grids
+
+"""File extension for all broker-advantage figures (§3.1)."""
+const FIG_EXT = ".pdf"
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -330,7 +360,7 @@ function plot_phase_panels(sweep::Symbol)
     cs = read_cell_summaries(tag)
     rl = read_regime_labels(tag)
     if cs === nothing || rl === nothing
-        note_missing("$(tag)_phase_panels.png", "missing cell_summaries or regime_labels CSV")
+        note_missing("$(tag)_phase_panels.pdf", "missing cell_summaries or regime_labels CSV")
         return
     end
 
@@ -340,24 +370,24 @@ function plot_phase_panels(sweep::Symbol)
         round(Int, first(fst_col))
     catch _; NaN end
 
-    fig = Figure(size=(1400, 1250))
+    fig = Figure(size=SIZE_3x3)
     Label(fig[0, 1:3], "Phase panels — $(String(sweep)) sweep (post-burn means, n_seeds=$(n_seeds))";
-          fontsize=SUPTITLE_FS, tellwidth=false)
+          fontsize=PUB_SUPTITLE_FS, tellwidth=false)
 
     function make_panel(r, c, metric_col::Symbol, title::String;
                         diverging::Bool=false, vmin=nothing, vmax=nothing,
                         cmap=nothing)
         xs, ys, M = sweep_matrix(cs, sweep, metric_col)
         ax = Axis(fig[r, c]; title=title, xlabel=ax_spec.x, ylabel=ax_spec.y,
-                  titlesize=TITLE_FS, xlabelsize=LABEL_FS, ylabelsize=LABEL_FS,
-                  xticklabelsize=TICK_FS, yticklabelsize=TICK_FS)
+                  titlesize=PUB_TITLE_FS, xlabelsize=PUB_LABEL_FS, ylabelsize=PUB_LABEL_FS,
+                  xticklabelsize=PUB_TICK_FS, yticklabelsize=PUB_TICK_FS)
         if isempty(xs)
             text!(ax, "no data"; position=(0.5, 0.5), align=(:center, :center))
             return
         end
         hm = draw_heatmap!(ax, xs, ys, M; diverging=diverging,
                            vmin=vmin, vmax=vmax, cmap=cmap)
-        Colorbar(fig[r, c, Right()], hm; width=8, ticklabelsize=TICK_FS)
+        Colorbar(fig[r, c, Right()], hm; width=8, ticklabelsize=PUB_TICK_FS)
     end
 
     make_panel(1, 1, :pi_broker_slot_mean, "Broker slot share π_b"; vmin=0.0, vmax=1.0)
@@ -378,8 +408,8 @@ function plot_phase_panels(sweep::Symbol)
     # (3,3) regime categorical panel
     draw_regime_map!(fig[3, 3], rl, sweep; title="Regime classification")
 
-    out = joinpath(FIG_ROOT, "$(tag)_phase_panels.png")
-    save(out, fig)
+    out = joinpath(FIG_ROOT, "$(tag)_phase_panels.pdf")
+    save(out, fig; pt_per_unit=1)
     println("wrote $(out)")
 end
 
@@ -412,8 +442,8 @@ function draw_regime_map!(parent, rl::DataFrame, sweep::Symbol;
     end
 
     ax = Axis(parent; title=title, xlabel=ax_spec.x, ylabel=ax_spec.y,
-              titlesize=TITLE_FS, xlabelsize=LABEL_FS, ylabelsize=LABEL_FS,
-              xticklabelsize=TICK_FS, yticklabelsize=TICK_FS)
+              titlesize=PUB_TITLE_FS, xlabelsize=PUB_LABEL_FS, ylabelsize=PUB_LABEL_FS,
+              xticklabelsize=PUB_TICK_FS, yticklabelsize=PUB_TICK_FS)
     if isempty(xs)
         text!(ax, "no data"; position=(0.5, 0.5), align=(:center, :center))
         return ax
@@ -440,7 +470,7 @@ function plot_regime_map(sweep::Symbol; threshold_broker::Union{Nothing,Float64}
     cs = read_cell_summaries(tag)
     if cs === nothing
         suffix = threshold_broker === nothing ? "" : @sprintf("_threshold_broker%03d", round(Int, threshold_broker*100))
-        note_missing("regime_map_$(tag)$(suffix).png", "missing cell_summaries CSV")
+        note_missing("regime_map_$(tag)$(suffix).pdf", "missing cell_summaries CSV")
         return
     end
 
@@ -448,7 +478,7 @@ function plot_regime_map(sweep::Symbol; threshold_broker::Union{Nothing,Float64}
     if threshold_broker === nothing
         rl = read_regime_labels(tag)
         if rl === nothing
-            note_missing("regime_map_$(tag).png", "missing regime_labels CSV")
+            note_missing("regime_map_$(tag).pdf", "missing regime_labels CSV")
             return
         end
     else
@@ -462,9 +492,9 @@ function plot_regime_map(sweep::Symbol; threshold_broker::Union{Nothing,Float64}
         end
     end
 
-    fig = Figure(size=(700, 520))
+    fig = Figure(size=SIZE_REGIME)
     suffix = threshold_broker === nothing ? "" : @sprintf(" (threshold π_b=%.2f)", threshold_broker)
-    Label(fig[0, 1], "Regime map — $(tag)$(suffix)"; fontsize=SUPTITLE_FS, tellwidth=false)
+    Label(fig[0, 1], "Regime map — $(tag)$(suffix)"; fontsize=PUB_SUPTITLE_FS, tellwidth=false)
     ax = draw_regime_map!(fig[1, 1], rl, sweep; title="", include_legend=false)
 
     # External legend
@@ -476,12 +506,12 @@ function plot_regime_map(sweep::Symbol; threshold_broker::Union{Nothing,Float64}
     thresh_B = threshold_broker === nothing ? 0.50 : threshold_broker
     Label(fig[2, 1:2],
           "Thresholds: π_b > $(thresh_B) defines broker-dominant; access>0.60 → BA; <0.30 → BI; else BD.";
-          fontsize=FOOTER_FS, color=:gray30, tellwidth=false)
+          fontsize=PUB_FOOTER_FS, color=:gray30, tellwidth=false)
 
     out_suffix = threshold_broker === nothing ? "" :
         @sprintf("_threshold_broker%03d", round(Int, threshold_broker*100))
-    out = joinpath(FIG_ROOT, "regime_map_$(tag)$(out_suffix).png")
-    save(out, fig)
+    out = joinpath(FIG_ROOT, "regime_map_$(tag)$(out_suffix).pdf")
+    save(out, fig; pt_per_unit=1)
     println("wrote $(out)")
 end
 
@@ -523,7 +553,7 @@ end
 function plot_fee_sensitivity()
     cs = read_cell_summaries("fee_cost")
     if cs === nothing
-        note_missing("fee_sensitivity_curves.png", "missing fee_cost_cell_summaries.csv")
+        note_missing("fee_sensitivity_curves.pdf", "missing fee_cost_cell_summaries.csv")
         return
     end
     # parse axes
@@ -538,14 +568,14 @@ function plot_fee_sensitivity()
     cs_df[!, :cost] = cost
 
     unique_costs = sort!(unique(cost))
-    fig = Figure(size=(1200, 900))
+    fig = Figure(size=SIZE_2x2)
     Label(fig[0, 1:2], "Fee sensitivity — curves over broker_fee_rate per self_search_cost_rate";
-          fontsize=SUPTITLE_FS, tellwidth=false)
+          fontsize=PUB_SUPTITLE_FS, tellwidth=false)
 
     function panel(r, c, ycol::Symbol, title::String; ylabel::String=String(ycol), yzero::Bool=false)
         ax = Axis(fig[r, c]; title=title, xlabel="broker_fee_rate", ylabel=ylabel,
-                  titlesize=TITLE_FS, xlabelsize=LABEL_FS, ylabelsize=LABEL_FS,
-                  xticklabelsize=TICK_FS, yticklabelsize=TICK_FS)
+                  titlesize=PUB_TITLE_FS, xlabelsize=PUB_LABEL_FS, ylabelsize=PUB_LABEL_FS,
+                  xticklabelsize=PUB_TICK_FS, yticklabelsize=PUB_TICK_FS)
         yzero && hlines!(ax, [0.0]; color=:gray50, linestyle=:dash)
         colors = Makie.wong_colors()
         for (k, ccost) in enumerate(unique_costs)
@@ -569,8 +599,8 @@ function plot_fee_sensitivity()
     panel(2, 2, dw_col, "Δ agent welfare (paired) or net value gap";
           ylabel=String(dw_col), yzero=true)
 
-    out = joinpath(FIG_ROOT, "fee_sensitivity_curves.png")
-    save(out, fig); println("wrote $(out)")
+    out = joinpath(FIG_ROOT, "fee_sensitivity_curves.pdf")
+    save(out, fig; pt_per_unit=1); println("wrote $(out)")
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -580,7 +610,7 @@ end
 function plot_ablation_bars()
     cs = read_cell_summaries("ablations")
     if cs === nothing
-        note_missing("ablation_bars.png", "missing ablations_cell_summaries.csv")
+        note_missing("ablation_bars.pdf", "missing ablations_cell_summaries.csv")
         return
     end
     # Parse cell_id = "<anchor>_<mode>"
@@ -609,9 +639,9 @@ function plot_ablation_bars()
         (:net_value_gap_mean, "net_value_gap", true),
         (:access_new_edge_frac_brk_mean, "access_new_edge_frac_brk", false),
     ]
-    fig = Figure(size=(max(1200, 280 * length(uniq_anchors)), 1200))
+    fig = Figure(size=(max(460, 220 * length(uniq_anchors)), 560))
     Label(fig[0, 1:length(uniq_anchors)],
-          "Ablation bars by anchor (post-burn means ± SE)"; fontsize=SUPTITLE_FS, tellwidth=false)
+          "Ablation bars by anchor (post-burn means ± SE)"; fontsize=PUB_SUPTITLE_FS, tellwidth=false)
     for (r, (met, ytitle, center0)) in enumerate(metrics)
         for (c, anc) in enumerate(uniq_anchors)
             sub = cs_df[cs_df.anchor .== anc, :]
@@ -626,17 +656,17 @@ function plot_ablation_bars()
             end
             ax = Axis(fig[r, c]; title = (r == 1 ? anc : ""),
                       ylabel = ytitle, xticks=(1:length(labels), labels),
-                      xticklabelsize=TICK_FS, xticklabelrotation=π/4,
-                      titlesize=TITLE_FS, ylabelsize=LABEL_FS,
-                      yticklabelsize=TICK_FS)
+                      xticklabelsize=PUB_TICK_FS, xticklabelrotation=π/4,
+                      titlesize=PUB_TITLE_FS, ylabelsize=PUB_LABEL_FS,
+                      yticklabelsize=PUB_TICK_FS)
             if isempty(ys); continue; end
             center0 && hlines!(ax, [0.0]; color=:gray50, linestyle=:dash)
             barplot!(ax, 1:length(ys), ys; color=COL_BROKER)
             errorbars!(ax, 1:length(ys), ys, es; color=:black, whiskerwidth=6)
         end
     end
-    out = joinpath(FIG_ROOT, "ablation_bars.png")
-    save(out, fig); println("wrote $(out)")
+    out = joinpath(FIG_ROOT, "ablation_bars.pdf")
+    save(out, fig; pt_per_unit=1); println("wrote $(out)")
 end
 
 """Compare temporal trajectories of selected ablation modes at one anchor.
@@ -645,15 +675,15 @@ FreezeBrokerLearning over time for one broker-dominant anchor."""
 function plot_ablation_temporal(anchor::String="broker_dominant")
     subdir = "ablations"
     if !isdir(joinpath(SIMS_ROOT, subdir))
-        note_missing("ablation_temporal_selected.png",
+        note_missing("ablation_temporal_selected.pdf",
                      "missing ablations per-cell caches")
         return
     end
     modes = ["none", "BlindBroker", "NoAccessBroker", "FrozenGraph",
              "FreezeBrokerLearning"]
-    fig = Figure(size=(1300, 700))
+    fig = Figure(size=SIZE_2x3)
     Label(fig[0, 1:3], "Ablation temporal — anchor: $(anchor)";
-          fontsize=SUPTITLE_FS, tellwidth=false)
+          fontsize=PUB_SUPTITLE_FS, tellwidth=false)
     specs = [
         (:pi_broker_slot, "π_b", 1, 1, false),
         (:rank_gap,       "rank_gap", 1, 2, true),
@@ -665,9 +695,9 @@ function plot_ablation_temporal(anchor::String="broker_dominant")
     colors = Makie.wong_colors()
     axes = Dict{Symbol,Any}()
     for (col, title, r, c, z) in specs
-        ax = Axis(fig[r, c]; title=title, xlabel="period", titlesize=TITLE_FS,
-                  xlabelsize=LABEL_FS, ylabelsize=LABEL_FS,
-                  xticklabelsize=TICK_FS, yticklabelsize=TICK_FS)
+        ax = Axis(fig[r, c]; title=title, xlabel="period", titlesize=PUB_TITLE_FS,
+                  xlabelsize=PUB_LABEL_FS, ylabelsize=PUB_LABEL_FS,
+                  xticklabelsize=PUB_TICK_FS, yticklabelsize=PUB_TICK_FS)
         z && hlines!(ax, [0.0]; color=:gray50, linestyle=:dash)
         axes[col] = ax
     end
@@ -700,8 +730,8 @@ function plot_ablation_temporal(anchor::String="broker_dominant")
         end
     end
     axislegend(axes[:pi_broker_slot]; position=:lt, labelsize=8, framewidth=0.5)
-    out = joinpath(FIG_ROOT, "ablation_temporal_selected.png")
-    save(out, fig); println("wrote $(out)")
+    out = joinpath(FIG_ROOT, "ablation_temporal_selected.pdf")
+    save(out, fig; pt_per_unit=1); println("wrote $(out)")
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -730,11 +760,11 @@ end
 function plot_sanity_diagnostics()
     cs = read_cell_summaries("sanity")
     if cs === nothing
-        note_missing("sanity_diagnostics.png", "missing sanity_cell_summaries.csv")
+        note_missing("sanity_diagnostics.pdf", "missing sanity_cell_summaries.csv")
         return
     end
-    fig = Figure(size=(1400, 800))
-    Label(fig[0, 1:4], "Sanity diagnostics (post-burn means ± SE)"; fontsize=SUPTITLE_FS, tellwidth=false)
+    fig = Figure(size=SIZE_2x3)
+    Label(fig[0, 1:4], "Sanity diagnostics (post-burn means ± SE)"; fontsize=PUB_SUPTITLE_FS, tellwidth=false)
     cell_labels = [replace(String(c), r"^\""=>"", r"\"$"=>"") for c in cs.cell_id]
     metrics = [
         (:rank_gap_mean, :rank_gap_se, "rank_gap", true),
@@ -752,14 +782,14 @@ function plot_sanity_diagnostics()
         es = se_col === nothing ? zeros(length(ys)) :
              (hasproperty(cs, se_col) ? Float64.(cs[:, se_col]) : zeros(length(ys)))
         ax = Axis(fig[r, c]; title=ytitle, xticks=(1:length(ys), cell_labels),
-                  xticklabelsize=TICK_FS-1, xticklabelrotation=π/3,
-                  titlesize=TITLE_FS, yticklabelsize=TICK_FS)
+                  xticklabelsize=PUB_TICK_FS-1, xticklabelrotation=π/3,
+                  titlesize=PUB_TITLE_FS, yticklabelsize=PUB_TICK_FS)
         center0 && hlines!(ax, [0.0]; color=:gray50, linestyle=:dash)
         barplot!(ax, 1:length(ys), ys; color=COL_DIAG)
         errorbars!(ax, 1:length(ys), ys, es; color=:black, whiskerwidth=5)
     end
-    out = joinpath(FIG_ROOT, "sanity_diagnostics.png")
-    save(out, fig); println("wrote $(out)")
+    out = joinpath(FIG_ROOT, "sanity_diagnostics.pdf")
+    save(out, fig; pt_per_unit=1); println("wrote $(out)")
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -769,12 +799,12 @@ end
 function plot_pilot_panels()
     cs = read_cell_summaries("pilot_delta_rho")
     if cs === nothing
-        note_missing("pilot_phase_panels.png", "missing pilot_delta_rho_cell_summaries.csv")
+        note_missing("pilot_phase_panels.pdf", "missing pilot_delta_rho_cell_summaries.csv")
         return
     end
-    fig = Figure(size=(1100, 650))
+    fig = Figure(size=SIZE_2x3)
     Label(fig[0, 1:3], "Pilot — 5 anchor cells (post-burn means ± SE)";
-          fontsize=SUPTITLE_FS, tellwidth=false)
+          fontsize=PUB_SUPTITLE_FS, tellwidth=false)
     labels = [replace(String(c), r"^\""=>"", r"\"$"=>"") for c in cs.cell_id]
     metrics = [
         (:pi_broker_slot_mean, :pi_broker_slot_se, "π_b", false),
@@ -790,20 +820,20 @@ function plot_pilot_panels()
         es = se === nothing ? zeros(length(ys)) :
              (hasproperty(cs, se) ? Float64.(cs[:, se]) : zeros(length(ys)))
         ax = Axis(fig[r, c]; title=ytitle, xticks=(1:length(ys), labels),
-                  xticklabelsize=TICK_FS-1, xticklabelrotation=π/3,
-                  titlesize=TITLE_FS, yticklabelsize=TICK_FS)
+                  xticklabelsize=PUB_TICK_FS-1, xticklabelrotation=π/3,
+                  titlesize=PUB_TITLE_FS, yticklabelsize=PUB_TICK_FS)
         center0 && hlines!(ax, [0.0]; color=:gray50, linestyle=:dash)
         barplot!(ax, 1:length(ys), ys; color=COL_DIAG)
         errorbars!(ax, 1:length(ys), ys, es; color=:black, whiskerwidth=5)
     end
-    out = joinpath(FIG_ROOT, "pilot_phase_panels.png")
-    save(out, fig); println("wrote $(out)")
+    out = joinpath(FIG_ROOT, "pilot_phase_panels.pdf")
+    save(out, fig; pt_per_unit=1); println("wrote $(out)")
 end
 
 function plot_pilot_temporal()
     subdir = "pilot_delta_rho"
     if !isdir(joinpath(SIMS_ROOT, subdir))
-        note_missing("pilot_temporal_overlay.png", "missing pilot_delta_rho per-cell caches")
+        note_missing("pilot_temporal_overlay.pdf", "missing pilot_delta_rho per-cell caches")
         return
     end
     caches = filter(f -> endswith(f, "_arm_treatment.jld2"),
@@ -814,21 +844,21 @@ function plot_pilot_temporal()
             m === nothing ? "" : String(m.captures[1])
         end
     ))
-    isempty(cell_ids) && (note_missing("pilot_temporal_overlay.png", "no pilot cells cached"); return)
+    isempty(cell_ids) && (note_missing("pilot_temporal_overlay.pdf", "no pilot cells cached"); return)
 
-    fig = Figure(size=(1200, 700))
-    Label(fig[0, 1:2], "Pilot — temporal overlay (treatment arm)"; fontsize=SUPTITLE_FS, tellwidth=false)
+    fig = Figure(size=SIZE_2x2)
+    Label(fig[0, 1:2], "Pilot — temporal overlay (treatment arm)"; fontsize=PUB_SUPTITLE_FS, tellwidth=false)
     colors = Makie.wong_colors()
     ax1 = Axis(fig[1, 1]; title="π_b", xlabel="period", ylabel="π_b",
-               titlesize=TITLE_FS)
+               titlesize=PUB_TITLE_FS)
     ax2 = Axis(fig[1, 2]; title="net_value_gap", xlabel="period", ylabel="net_value_gap",
-               titlesize=TITLE_FS)
+               titlesize=PUB_TITLE_FS)
     hlines!(ax2, [0.0]; color=:gray50, linestyle=:dash)
     ax3 = Axis(fig[2, 1]; title="rank_gap", xlabel="period", ylabel="rank_gap",
-               titlesize=TITLE_FS)
+               titlesize=PUB_TITLE_FS)
     hlines!(ax3, [0.0]; color=:gray50, linestyle=:dash)
     ax4 = Axis(fig[2, 2]; title="access_new_edge_frac_brk", xlabel="period", ylabel="frac",
-               titlesize=TITLE_FS)
+               titlesize=PUB_TITLE_FS)
     for (i, cid) in enumerate(cell_ids)
         dfs = load_cell_metrics(subdir, cid; arm=:treatment)
         isempty(dfs) && continue
@@ -854,8 +884,8 @@ function plot_pilot_temporal()
         lines!(ax4, periods, meanv(:access_new_edge_frac_brk); color=color)
     end
     axislegend(ax1; position=:lb, labelsize=8, framewidth=0.5)
-    out = joinpath(FIG_ROOT, "pilot_temporal_overlay.png")
-    save(out, fig); println("wrote $(out)")
+    out = joinpath(FIG_ROOT, "pilot_temporal_overlay.pdf")
+    save(out, fig; pt_per_unit=1); println("wrote $(out)")
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -866,21 +896,21 @@ function plot_full_confirm_comparison()
     simple = read_cell_summaries("delta_rho")  # treat delta_rho as "simplified" source
     full   = read_cell_summaries("full_confirm")
     if full === nothing
-        note_missing("full_confirm_comparison.png", "missing full_confirm_cell_summaries.csv")
+        note_missing("full_confirm_comparison.pdf", "missing full_confirm_cell_summaries.csv")
         return
     end
     full_labels = [replace(String(c), r"^\""=>"", r"\"$"=>"") for c in full.cell_id]
-    fig = Figure(size=(1200, 800))
+    fig = Figure(size=SIZE_2x2)
     Label(fig[0, 1:2], "Full-confirm comparison (N=1000/T=200 vs N=300/T=120)";
-          fontsize=SUPTITLE_FS, tellwidth=false)
+          fontsize=PUB_SUPTITLE_FS, tellwidth=false)
 
     metrics = [(:pi_broker_slot_mean, "π_b"), (:net_value_gap_mean, "net_value_gap"),
                (:rank_gap_mean, "rank_gap"), (:r2_gap_mean, "r²_gap")]
     for (i, (met, ytitle)) in enumerate(metrics)
         r = div(i-1, 2) + 1; c = mod(i-1, 2) + 1
         ax = Axis(fig[r, c]; title=ytitle, xticks=(1:length(full_labels), full_labels),
-                  xticklabelsize=TICK_FS, xticklabelrotation=π/4, titlesize=TITLE_FS,
-                  yticklabelsize=TICK_FS)
+                  xticklabelsize=PUB_TICK_FS, xticklabelrotation=π/4, titlesize=PUB_TITLE_FS,
+                  yticklabelsize=PUB_TICK_FS)
         ys_full = Float64.(full[:, met])
         barplot!(ax, 1:length(ys_full), ys_full; color=COL_BROKER,
                  label="full (N=1000)")
@@ -895,8 +925,8 @@ function plot_full_confirm_comparison()
             axislegend(ax; position=:lt, labelsize=8, framewidth=0.5)
         end
     end
-    out = joinpath(FIG_ROOT, "full_confirm_comparison.png")
-    save(out, fig); println("wrote $(out)")
+    out = joinpath(FIG_ROOT, "full_confirm_comparison.pdf")
+    save(out, fig; pt_per_unit=1); println("wrote $(out)")
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -928,11 +958,11 @@ function plot_temporal_cases_overlay()
         any_cache && push!(avail, (sd, cid, lab))
     end
     if isempty(avail)
-        note_missing("temporal_cases_overlay.png", "no representative cells found in sweeps")
+        note_missing("temporal_cases_overlay.pdf", "no representative cells found in sweeps")
         return
     end
-    fig = Figure(size=(1300, 800))
-    Label(fig[0, 1:3], "Representative cells — temporal overlay"; fontsize=SUPTITLE_FS, tellwidth=false)
+    fig = Figure(size=SIZE_2x3)
+    Label(fig[0, 1:3], "Representative cells — temporal overlay"; fontsize=PUB_SUPTITLE_FS, tellwidth=false)
     colors = Makie.wong_colors()
     ax_specs = [
         (:pi_broker_slot, "Broker slot share", 1, 1, false),
@@ -944,9 +974,9 @@ function plot_temporal_cases_overlay()
     ]
     axes = Dict{Symbol,Any}()
     for (col, title, r, c, zero) in ax_specs
-        ax = Axis(fig[r, c]; title=title, xlabel="period", titlesize=TITLE_FS,
-                  xlabelsize=LABEL_FS, ylabelsize=LABEL_FS,
-                  xticklabelsize=TICK_FS, yticklabelsize=TICK_FS)
+        ax = Axis(fig[r, c]; title=title, xlabel="period", titlesize=PUB_TITLE_FS,
+                  xlabelsize=PUB_LABEL_FS, ylabelsize=PUB_LABEL_FS,
+                  xticklabelsize=PUB_TICK_FS, yticklabelsize=PUB_TICK_FS)
         zero && hlines!(ax, [0.0]; color=:gray50, linestyle=:dash)
         axes[col] = ax
     end
@@ -977,8 +1007,8 @@ function plot_temporal_cases_overlay()
         end
     end
     axislegend(axes[:pi_broker_slot]; position=:lb, labelsize=9, framewidth=0.5)
-    out = joinpath(FIG_ROOT, "temporal_cases_overlay.png")
-    save(out, fig); println("wrote $(out)")
+    out = joinpath(FIG_ROOT, "temporal_cases_overlay.pdf")
+    save(out, fig; pt_per_unit=1); println("wrote $(out)")
 end
 
 """Build an advantage-dynamics dashboard for a single anchor cell.
@@ -989,7 +1019,7 @@ Row 4: info & structure (rank_gap, r2_gap, broker_history_size, betweenness)"""
 function plot_advantage_dynamics(subdir::String, cell_id::String, label::String)
     dfs = load_cell_metrics(subdir, cell_id; arm=:treatment)
     if isempty(dfs)
-        note_missing("advantage_dynamics_$(label).png",
+        note_missing("advantage_dynamics_$(label).pdf",
                      "no cached treatment runs for $(subdir)/$(cell_id)")
         return
     end
@@ -1009,53 +1039,53 @@ function plot_advantage_dynamics(subdir::String, cell_id::String, label::String)
          end for t in 1:T]
     end
 
-    fig = Figure(size=(1500, 1200))
+    fig = Figure(size=SIZE_4x4)
     Label(fig[0, 1:4], "Advantage dynamics — $(label) ($(subdir)/$(cell_id))";
-          fontsize=SUPTITLE_FS, tellwidth=false)
+          fontsize=PUB_SUPTITLE_FS, tellwidth=false)
     # Row 1
-    ax = Axis(fig[1, 1]; title="π_b", xlabel="period", titlesize=TITLE_FS)
+    ax = Axis(fig[1, 1]; title="π_b", xlabel="period", titlesize=PUB_TITLE_FS)
     lines!(ax, periods, meanv(:pi_broker_slot); color=COL_BROKER, linewidth=2)
-    ax = Axis(fig[1, 2]; title="demand by channel", xlabel="period", titlesize=TITLE_FS)
+    ax = Axis(fig[1, 2]; title="demand by channel", xlabel="period", titlesize=PUB_TITLE_FS)
     lines!(ax, periods, meanv(:self_demand_slots);   color=COL_AGENT, label="self", linewidth=2)
     lines!(ax, periods, meanv(:broker_demand_slots); color=COL_BROKER, label="broker", linewidth=2)
     axislegend(ax; position=:lt, labelsize=8)
-    ax = Axis(fig[1, 3]; title="fill rate by channel", xlabel="period", titlesize=TITLE_FS)
+    ax = Axis(fig[1, 3]; title="fill rate by channel", xlabel="period", titlesize=PUB_TITLE_FS)
     lines!(ax, periods, meanv(:self_fill_rate);   color=COL_AGENT, label="self")
     lines!(ax, periods, meanv(:broker_fill_rate); color=COL_BROKER, label="broker")
     axislegend(ax; position=:lb, labelsize=8)
-    ax = Axis(fig[1, 4]; title="matches by channel", xlabel="period", titlesize=TITLE_FS)
+    ax = Axis(fig[1, 4]; title="matches by channel", xlabel="period", titlesize=PUB_TITLE_FS)
     lines!(ax, periods, meanv(:n_self_matches);    color=COL_AGENT, label="self")
     lines!(ax, periods, meanv(:n_broker_standard); color=COL_BROKER, label="broker")
     axislegend(ax; position=:lb, labelsize=8)
 
     # Row 2
-    ax = Axis(fig[2, 1]; title="conditional match quality", xlabel="period", titlesize=TITLE_FS)
+    ax = Axis(fig[2, 1]; title="conditional match quality", xlabel="period", titlesize=PUB_TITLE_FS)
     lines!(ax, periods, meanv(:q_self_mean_cond);   color=COL_AGENT,  label="self")
     lines!(ax, periods, meanv(:q_broker_mean_cond); color=COL_BROKER, label="broker")
     axislegend(ax; position=:lb, labelsize=8)
-    ax = Axis(fig[2, 2]; title="gross q / demanded slot", xlabel="period", titlesize=TITLE_FS)
+    ax = Axis(fig[2, 2]; title="gross q / demanded slot", xlabel="period", titlesize=PUB_TITLE_FS)
     lines!(ax, periods, meanv(:q_self_per_demand_slot);   color=COL_AGENT,  label="self")
     lines!(ax, periods, meanv(:q_broker_per_demand_slot); color=COL_BROKER, label="broker")
     axislegend(ax; position=:lb, labelsize=8)
-    ax = Axis(fig[2, 3]; title="net / demanded slot", xlabel="period", titlesize=TITLE_FS)
+    ax = Axis(fig[2, 3]; title="net / demanded slot", xlabel="period", titlesize=PUB_TITLE_FS)
     lines!(ax, periods, meanv(:net_self_per_demand_slot);   color=COL_AGENT,  label="self")
     lines!(ax, periods, meanv(:net_broker_per_demand_slot); color=COL_BROKER, label="broker")
     axislegend(ax; position=:lb, labelsize=8)
-    ax = Axis(fig[2, 4]; title="net value gap (broker − self)", xlabel="period", titlesize=TITLE_FS)
+    ax = Axis(fig[2, 4]; title="net value gap (broker − self)", xlabel="period", titlesize=PUB_TITLE_FS)
     hlines!(ax, [0.0]; color=:gray50, linestyle=:dash)
     lines!(ax, periods, meanv(:net_value_gap); color=COL_GAP, linewidth=2)
 
     # Row 3
-    ax = Axis(fig[3, 1]; title="quality_selection component", xlabel="period", titlesize=TITLE_FS)
+    ax = Axis(fig[3, 1]; title="quality_selection component", xlabel="period", titlesize=PUB_TITLE_FS)
     hlines!(ax, [0.0]; color=:gray50, linestyle=:dash)
     lines!(ax, periods, meanv(:quality_selection_component); color=COL_DIAG)
-    ax = Axis(fig[3, 2]; title="fill/access component", xlabel="period", titlesize=TITLE_FS)
+    ax = Axis(fig[3, 2]; title="fill/access component", xlabel="period", titlesize=PUB_TITLE_FS)
     hlines!(ax, [0.0]; color=:gray50, linestyle=:dash)
     lines!(ax, periods, meanv(:fill_access_component); color=COL_ACCESS)
-    ax = Axis(fig[3, 3]; title="fee/cost component", xlabel="period", titlesize=TITLE_FS)
+    ax = Axis(fig[3, 3]; title="fee/cost component", xlabel="period", titlesize=PUB_TITLE_FS)
     hlines!(ax, [0.0]; color=:gray50, linestyle=:dash)
     lines!(ax, periods, meanv(:fee_cost_component); color=COL_CAPTURE)
-    ax = Axis(fig[3, 4]; title="decomposition check (sum vs net_value_gap)", xlabel="period", titlesize=TITLE_FS)
+    ax = Axis(fig[3, 4]; title="decomposition check (sum vs net_value_gap)", xlabel="period", titlesize=PUB_TITLE_FS)
     hlines!(ax, [0.0]; color=:gray50, linestyle=:dash)
     qs = meanv(:quality_selection_component); fa = meanv(:fill_access_component);
     fc = meanv(:fee_cost_component); nv = meanv(:net_value_gap)
@@ -1064,19 +1094,19 @@ function plot_advantage_dynamics(subdir::String, cell_id::String, label::String)
     axislegend(ax; position=:lb, labelsize=8)
 
     # Row 4
-    ax = Axis(fig[4, 1]; title="rank_gap", xlabel="period", titlesize=TITLE_FS)
+    ax = Axis(fig[4, 1]; title="rank_gap", xlabel="period", titlesize=PUB_TITLE_FS)
     hlines!(ax, [0.0]; color=:gray50, linestyle=:dash)
     lines!(ax, periods, meanv(:rank_gap); color=COL_GAP, linewidth=2)
-    ax = Axis(fig[4, 2]; title="r²_gap", xlabel="period", titlesize=TITLE_FS)
+    ax = Axis(fig[4, 2]; title="r²_gap", xlabel="period", titlesize=PUB_TITLE_FS)
     hlines!(ax, [0.0]; color=:gray50, linestyle=:dash)
     lines!(ax, periods, meanv(:r2_gap); color=COL_GAP, linewidth=2)
-    ax = Axis(fig[4, 3]; title="broker_history_size", xlabel="period", titlesize=TITLE_FS)
+    ax = Axis(fig[4, 3]; title="broker_history_size", xlabel="period", titlesize=PUB_TITLE_FS)
     lines!(ax, periods, meanv(:broker_history_size); color=COL_REPUTATION, linewidth=2)
-    ax = Axis(fig[4, 4]; title="betweenness", xlabel="period", titlesize=TITLE_FS)
+    ax = Axis(fig[4, 4]; title="betweenness", xlabel="period", titlesize=PUB_TITLE_FS)
     lines!(ax, periods, meanv(:betweenness); color=COL_DIAG, linewidth=2)
 
-    out = joinpath(FIG_ROOT, "advantage_dynamics_$(label).png")
-    save(out, fig); println("wrote $(out)")
+    out = joinpath(FIG_ROOT, "advantage_dynamics_$(label).pdf")
+    save(out, fig; pt_per_unit=1); println("wrote $(out)")
 end
 
 """Phase portrait: 2x2 with period-ordered trajectory through (x,y) pairs for
@@ -1084,7 +1114,7 @@ one representative cell."""
 function plot_phase_portraits(subdir::String, cell_id::String, label::String)
     dfs = load_cell_metrics(subdir, cell_id; arm=:treatment)
     if isempty(dfs)
-        note_missing("phase_portraits_$(label).png",
+        note_missing("phase_portraits_$(label).pdf",
                      "no cached runs for $(subdir)/$(cell_id)")
         return
     end
@@ -1102,9 +1132,9 @@ function plot_phase_portraits(subdir::String, cell_id::String, label::String)
             isempty(vv) ? NaN : mean(vv)
          end for t in 1:T]
     end
-    fig = Figure(size=(900, 800))
+    fig = Figure(size=SIZE_2x2)
     Label(fig[0, 1:2], "Phase portraits — $(label) ($(subdir)/$(cell_id))";
-          fontsize=SUPTITLE_FS, tellwidth=false)
+          fontsize=PUB_SUPTITLE_FS, tellwidth=false)
     pairs = [
         ((:rank_gap, "rank_gap"), (:pi_broker_slot, "π_b")),
         ((:net_value_gap, "net_value_gap"), (:pi_broker_slot, "π_b")),
@@ -1116,15 +1146,15 @@ function plot_phase_portraits(subdir::String, cell_id::String, label::String)
         r = div(i-1, 2) + 1; c = mod(i-1, 2) + 1
         xs = meanv(xc); ys = meanv(yc)
         ax = Axis(fig[r, c]; xlabel=xl, ylabel=yl, title="$(yl) vs $(xl)",
-                  titlesize=TITLE_FS, xlabelsize=LABEL_FS, ylabelsize=LABEL_FS,
-                  xticklabelsize=TICK_FS, yticklabelsize=TICK_FS)
+                  titlesize=PUB_TITLE_FS, xlabelsize=PUB_LABEL_FS, ylabelsize=PUB_LABEL_FS,
+                  xticklabelsize=PUB_TICK_FS, yticklabelsize=PUB_TICK_FS)
         # Color by period progression (darker = earlier)
         n = length(xs)
         scatter!(ax, xs, ys; color=1:n, colormap=:viridis, markersize=4)
         lines!(ax, xs, ys; color=:gray40, linewidth=0.8)
     end
-    out = joinpath(FIG_ROOT, "phase_portraits_$(label).png")
-    save(out, fig); println("wrote $(out)")
+    out = joinpath(FIG_ROOT, "phase_portraits_$(label).pdf")
+    save(out, fig; pt_per_unit=1); println("wrote $(out)")
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1196,10 +1226,10 @@ function main()
         tag = String(stage)
         cs = read_cell_summaries(tag)
         if cs === nothing
-            note_missing("$(tag)_bars.png", "missing $(tag)_cell_summaries.csv"); return
+            note_missing("$(tag)_bars.pdf", "missing $(tag)_cell_summaries.csv"); return
         end
-        fig = Figure(size=(1100, 650))
-        Label(fig[0, 1:3], "$(tag) — post-burn means ± SE"; fontsize=SUPTITLE_FS, tellwidth=false)
+        fig = Figure(size=SIZE_2x3)
+        Label(fig[0, 1:3], "$(tag) — post-burn means ± SE"; fontsize=PUB_SUPTITLE_FS, tellwidth=false)
         labels = [replace(String(c), r"^\""=>"", r"\"$"=>"") for c in cs.cell_id]
         metrics = [
             (:pi_broker_slot_mean, :pi_broker_slot_se, "π_b", false),
@@ -1214,13 +1244,13 @@ function main()
             ys = Float64.(cs[:, met])
             es = hasproperty(cs, se) ? Float64.(cs[:, se]) : zeros(length(ys))
             ax = Axis(fig[r, c]; title=ytitle, xticks=(1:length(ys), labels),
-                      xticklabelsize=TICK_FS-1, xticklabelrotation=π/3,
-                      titlesize=TITLE_FS, yticklabelsize=TICK_FS)
+                      xticklabelsize=PUB_TICK_FS-1, xticklabelrotation=π/3,
+                      titlesize=PUB_TITLE_FS, yticklabelsize=PUB_TICK_FS)
             c0 && hlines!(ax, [0.0]; color=:gray50, linestyle=:dash)
             barplot!(ax, 1:length(ys), ys; color=COL_DIAG)
             errorbars!(ax, 1:length(ys), ys, es; color=:black, whiskerwidth=5)
         end
-        out = joinpath(FIG_ROOT, "$(tag)_bars.png"); save(out, fig); println("wrote $(out)")
+        out = joinpath(FIG_ROOT, "$(tag)_bars.pdf"); save(out, fig; pt_per_unit=1); println("wrote $(out)")
     else
         error("unknown stage: $stage")
     end

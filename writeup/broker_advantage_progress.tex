@@ -1,11 +1,14 @@
-\documentclass[11pt]{article}
-\usepackage[margin=1in]{geometry}
+\documentclass[11pt,a4paper]{article}
+\usepackage[a4paper,margin=25mm]{geometry}
 \usepackage{amsmath,amssymb,mathtools}
 \usepackage{booktabs}
+\usepackage{graphicx}
 \usepackage{hyperref}
 \usepackage{microtype}
 \usepackage{xcolor}
 \usepackage{enumitem}
+
+\graphicspath{{../data/figures/broker_advantage/}}
 
 \title{Instrumenting a Matching-Market Agent-Based Simulator for Broker-Advantage Attribution:\\
   Model Changes, Diagnostic Controls, and Results}
@@ -246,6 +249,20 @@ Cell ($\delta$, $\rho$) & $\pi_b$ (se) & rank\_gap (se) & $R^2_{\text{within}}$ 
 \end{tabular}
 \end{table}
 
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{delta_rho_phase_panels.pdf}
+  \caption{\texttt{delta\_rho} sweep phase panels ($\rho$ on the x-axis, $\delta$ on the y-axis; treatment arm only, 15 seeds per cell). Panel (1,1) $\pi_b$; (1,2) paired $\Delta W_{\text{ag}}$; (1,3) \texttt{net\_value\_gap}; (2,1) within-agent rank\_gap; (2,2) within-agent $R^2$ gap; (2,3) fill-rate gap; (3,1) access\_new\_edge fraction; (3,2) assessment\_prior\_partner fraction; (3,3) regime code. All values are post-burn seed means from \texttt{data/summaries/broker\_advantage/delta\_rho\_cell\_summaries.csv} and \texttt{delta\_rho\_regime\_labels.csv}.}
+  \label{fig:dr-panels}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.7\linewidth]{regime_map_delta_rho.pdf}
+  \caption{\texttt{delta\_rho} regime map at default thresholds ($\pi_b>0.5$ for broker-dominant; access$>0.60$ $\to$ BA; $<0.30$ $\to$ BI; else BD). Short codes from \texttt{regime\_map} legend: RE = \textsc{RentExtraction}, BI = \textsc{BrokerDominant\_Assessment}, M = \textsc{Mixed}. 3 RE cells at $\rho{=}0$ with $\delta\in\{0, 0.25, 0.5\}$; the single BI cell is at $(\delta,\rho){=}(0.75, 0)$; 16 Mixed cells fill the rest.}
+  \label{fig:dr-regime}
+\end{figure}
+
 Observations strictly from the CSV cells cited above:
 \begin{itemize}[leftmargin=1.5em]
 \item \textbf{Paired welfare $\Delta W_{\text{ag}}$ flips sign across the sweep.} Negative (harmful to agents net-of-paired-control) at $\delta{=}0$ and low $\delta$ (e.g.\ $(0.50,0.50){=}-580.2$), positive at every $\delta{=}0.75$ cell except $(0.75,1.00){=}-836.3$. The large SEs (up to $\sim$860) mean individual-cell sign judgments require more seeds before firm claims.
@@ -257,6 +274,13 @@ Observations strictly from the CSV cells cited above:
 \paragraph{\texttt{fee\_cost} sweep ($5\times 5 = 25$ cells, $\phi_{\text{rate}}\in\{0,0.05,0.15,0.30,0.60\}$, $c_{s,\text{rate}}\in\{0,0.05,0.15,0.30,0.60\}$; $\delta,\rho$ held at 0.50).} Regime distribution at default thresholds (\texttt{fee\_cost\_regime\_labels.csv}): 3 \textsc{BrokerDominant\_Assessment}, 22 \textsc{Mixed}. All three \textsc{BI} cells are at the \emph{highest} self-search cost ($c_{s,\text{rate}}{=}0.60$) with low-to-mid broker fee ($\phi_{\text{rate}}\in\{0, 0.05, 0.15\}$), as expected: when self-search is expensive, broker use is dominant.
 
 Residualized $R^2$ for \texttt{fee\_cost} is well-behaved: \texttt{r2\_gap\_residualized\_mean} ranges from 0.192 to 0.296 across all 25 cells (\texttt{fee\_cost\_cell\_summaries.csv}), well within $[0, 1]$. The gate issue is isolated to \texttt{delta\_rho}'s high-$\rho$ cells.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{fee_cost_phase_panels.pdf}
+  \caption{\texttt{fee\_cost} sweep phase panels (broker\_fee\_rate on x, self\_search\_cost\_rate on y; $\delta,\rho{=}0.5$ held). Panel layout matches Figure~\ref{fig:dr-panels}. All values from \texttt{data/summaries/broker\_advantage/fee\_cost\_cell\_summaries.csv}; regime codes from \texttt{fee\_cost\_regime\_labels.csv}.}
+  \label{fig:fc-panels}
+\end{figure}
 
 \textbf{No \textsc{FeeInducedBypass} (\texttt{FB}) cells detected} on this grid. The classifier requires $\pi_b{<}0.20$, but $\pi_b$ ranges from $\sim$0.29 to $\sim$0.55 even at the highest fee/lowest cost corner. Whether this rules out \textsc{FB} at the simplified scale or merely means the grid did not go high enough on $\phi$ is an open question; threshold-robustness maps at $\pi_b{=}0.30$ and $\pi_b{=}0.70$ (\texttt{data/figures/broker\_advantage/regime\_map\_fee\_cost\_threshold\_broker\{030,070\}.png}) will show whether the picture changes at looser bars. \textbf{No \textsc{RentExtraction} (\texttt{RE}) cells detected} either. This differs from \texttt{delta\_rho} where \textsc{RE} appeared at $\rho{=}0$; in \texttt{fee\_cost} we are at $\delta,\rho{=}0.5$ so the $\rho=0$ condition that drove \texttt{delta\_rho}'s \textsc{RE} is not explored here.
 
@@ -278,6 +302,13 @@ Cell ($n_{\text{str}}$, $\alpha_R$) & $\pi_b$ (se) & rank\_gap & net\_val\_gap &
 
 The $n_{\text{strangers}}{=}0$ row has the strongest rank\_gap and highest broker adoption (up to 0.642 at $\alpha_R{=}0.40$), because with no self-accessible strangers the broker's roster becomes the primary channel for unknown-partner matches. As $n_{\text{strangers}}$ rises to 20, self-search gains breadth, $\pi_b$ drops by roughly half, and the rank\_gap shrinks accordingly. $\Delta W_{\text{ag}}$ has large SEs (up to $\sim$980), so sign judgments require caution; the $n_{\text{str}}{=}0$ column shows positive $\Delta W_{\text{ag}}$ (72\,503 to 76\,374 across $\alpha_R$), which is striking but must be re-read in absolute units with the fee structure noted.
 
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{transparency_access_phase_panels.pdf}
+  \caption{\texttt{transparency\_access} sweep phase panels ($n_{\text{strangers}}$ on x, $\alpha_R$ on y; $\delta,\rho{=}0.5$). Layout matches Figure~\ref{fig:dr-panels}. $\pi_b$ rises monotonically in $\alpha_R$ at every $n_{\text{strangers}}$ (cf.\ Table~\ref{tab:c3_ta}); four distinct regime codes appear on this sweep (3 BI, 2 UI, 1 RE, 14 M per \texttt{transparency\_access\_regime\_labels.csv}).}
+  \label{fig:ta-panels}
+\end{figure}
+
 \paragraph{\texttt{learning\_turnover} sweep ($4\times 5 = 20$ cells, $p_{\text{demand}}\in\{0.25,0.50,0.75,0.90\}$, $\eta\in\{0,0.01,0.02,0.05,0.10\}$; $\delta,\rho$ held at 0.50).} Regime distribution (\texttt{learning\_turnover\_regime\_labels.csv}): \textbf{15 \textsc{Mixed}}, \textbf{3 \textsc{BrokerDominant\_Dual}} (\texttt{pd0.25\_eta0.05}, \texttt{pd0.25\_eta0.10}, \texttt{pd0.50\_eta0.10}), \textbf{1 \textsc{BrokerDominant\_Assessment}} (\texttt{pd0.25\_eta0.02}), \textbf{1 \textsc{RentExtraction}} (\texttt{pd0.25\_eta0.01}). All five non-\textsc{Mixed} cells cluster at low $p_{\text{demand}}\in\{0.25,0.50\}$ \emph{with} non-zero turnover $\eta\ge 0.01$; at $p_{\text{demand}}\ge 0.75$ all 10 cells are \textsc{Mixed}.
 
 \begin{table}[h]\centering\small
@@ -298,6 +329,13 @@ Cell ($p_d$, $\eta$) & $\pi_b$ & rank\_gap & net\_val\_gap & $\Delta W_{\text{ag
 \bottomrule
 \end{tabular}
 \end{table}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{learning_turnover_phase_panels.pdf}
+  \caption{\texttt{learning\_turnover} sweep phase panels ($p_{\text{demand}}$ on x, $\eta$ on y; $\delta,\rho{=}0.5$). Layout matches Figure~\ref{fig:dr-panels}. The $\eta{=}0$ row has \emph{negative} rank\_gap at every $p_{\text{demand}}$; non-\textsc{Mixed} regimes cluster at low $p_{\text{demand}}$ with $\eta\ge 0.01$. Values from \texttt{learning\_turnover\_cell\_summaries.csv} and \texttt{learning\_turnover\_regime\_labels.csv}.}
+  \label{fig:lt-panels}
+\end{figure}
 
 Two findings from the CSV worth flagging:
 \begin{itemize}[leftmargin=1.5em]
@@ -360,6 +398,13 @@ high\_info\_low\_access & ---  & 0.231 & --- & $\mathbf{+20229.6}$\,(2499) & $+$
 \end{tabular}
 \end{table}
 
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{full_confirm_comparison.pdf}
+  \caption{Stage~4 full-confirm comparison across the 5 hand-picked cells at $N{=}1000,T{=}200$, 15 seeds/arm (\texttt{data/summaries/broker\_advantage/full\_confirm\_cell\_summaries.csv}). Panels: $\pi_b$, \texttt{net\_value\_gap}, rank\_gap, $R^2$\_gap. All 5 cells classify as \textsc{Mixed} at default thresholds; the underlying $\Delta W_{\text{ag}}$ magnitudes amplify at full scale relative to the simplified-sweep counterparts (Table~\ref{tab:c5}).}
+  \label{fig:c5-confirm}
+\end{figure}
+
 \paragraph{Key Stage~4 findings strictly from the CSV cells cited.}
 \begin{itemize}[leftmargin=1.5em]
 \item \textbf{Magnitude amplification.} At \texttt{broker\_dominant}, $\Delta W_{\text{ag}}$ grows from $+364.7$ (SE 648, not statistically significant at simplified scale) to $+16614.0$ (SE 2152, clearly $>0$) at full scale --- a $\sim$45$\times$ amplification. Similar amplification in magnitude for the boundary and self-search cells (signs flip but the signal is still within 1--2 SE at simplified scale).
@@ -388,6 +433,20 @@ These full-scale decompositions are the reliable reference; simplified-scale res
 \item \textsc{FeeInducedBypass} (\texttt{FB}) requires $\pi_b{<}0.20$ with positive rank\_gap. \textbf{No \texttt{FB} cells appear on any of the four sweeps} at default thresholds. In \texttt{fee\_cost}, $\pi_b$ ranges 0.29--0.55 even at the high-$\phi$/low-$c_s$ corner \texttt{bfr0.60\_ssc0.00} --- the simplified-scale grid does not drive adoption low enough to hit the $\pi_b{<}0.20$ \texttt{FB} condition. Threshold-robustness maps at $\pi_b{=}0.30$ and $\pi_b{=}0.70$ (\texttt{regime\_map\_fee\_cost\_threshold\_broker\{030,070\}.png}) are produced but do not change the bypass-vs-dominant decision for this grid. Whether \textsc{FB} emerges at full scale is tested in §\ref{sec:c5}.
 \item \textbf{Net value gap is negative in 84 of 85 cells across all four sweeps.} The single exception is \texttt{pd0.25\_eta0.10} in the \texttt{learning\_turnover} sweep, where \texttt{net\_value\_gap\_mean}${=}+0.139$ with $\pi_b{=}0.926$, rank\_gap${=}+0.407$, $\Delta W_{\text{ag}}{=}+4815.2$ (\texttt{learning\_turnover\_cell\_summaries.csv}, Table~\ref{tab:c3_lt}). This is the clearest broker-beneficial regime found at simplified scale: high turnover at low demand frequency gives the broker a sustained information advantage and fills most demanded slots.
 \end{itemize}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{fee_sensitivity_curves.pdf}
+  \caption{Fee sensitivity: $\pi_b$, \texttt{net\_value\_gap}, rank\_gap, and $\Delta W_{\text{ag}}$ (or net value fallback) as functions of \texttt{broker\_fee\_rate}, one curve per \texttt{self\_search\_cost\_rate} level (\texttt{fee\_cost\_cell\_summaries.csv}). The absence of a large drop in $\pi_b$ at the highest fees is the figure-level evidence against a \textsc{FeeInducedBypass} regime at this grid's default $(\delta,\rho){=}(0.5,0.5)$.}
+  \label{fig:fee-sens}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{temporal_cases_overlay.pdf}
+  \caption{Representative cells across sweeps, temporal overlay (\texttt{data/sims/broker\_advantage/<sweep>/cell\_\_<id>\_\_seed\_*\_\_arm\_treatment.jld2}). Each panel shows ensemble means across the 15 seeds; burn-in period marked by the vertical dashed line. Panels: $\pi_b$, \texttt{net\_value\_gap}, rank\_gap, access\_new\_edge\_frac\_brk, \texttt{betweenness}, \texttt{welfare\_agents\_period}.}
+  \label{fig:tco}
+\end{figure}
 
 \paragraph{(iii) Regime distribution and the ``Mixed'' majority.} 67/85 cells across all four sweeps classify as \textsc{Mixed} (\texttt{M}) under default thresholds ($\pi_b{=}0.50$, access threshold $0.60$). The remaining 18 cells are: 8 \texttt{BI}, 5 \texttt{RE}, 3 \texttt{BD}, 2 \texttt{UI}. The thresholds are conservative; the alternative maps at $\pi_b{\in}\{0.30,0.70\}$ are produced for \texttt{delta\_rho} and \texttt{fee\_cost}.
 
@@ -418,6 +477,13 @@ self\_search                                   & $R^2_{\text{demeaned}}$ & $+$0.
 \bottomrule
 \end{tabular}
 \end{table}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{ablation_bars.pdf}
+  \caption{Ablation bars by anchor ($\pi_b$, rank\_gap, $R^2$\_gap, \texttt{net\_value\_gap}, \texttt{access\_new\_edge\_frac\_brk}) across the 8 ablation modes (none, NoBroker, NoRegime, BlindBroker, NoAccessBroker, FrozenGraph, NoTurnover, FreezeBrokerLearning). Post-burn seed means $\pm$ SE from \texttt{data/summaries/broker\_advantage/ablations\_cell\_summaries.csv}. BlindBroker collapses rank\_gap at \texttt{baseline} and \texttt{broker\_dominant} but not at \texttt{self\_search} (cf.\ Table~\ref{tab:c4}).}
+  \label{fig:c4-bars}
+\end{figure}
 
 \noindent At \texttt{baseline} and \texttt{broker\_dominant}, the pair-input component is large and positive, and the pooled-data component is \emph{negative} (BlindBroker is worse than a per-agent model). At \texttt{self\_search} (additively separable, $\rho{=}1$), pair-input component is essentially zero ($+0.003$ within-rank), and the entire $+0.238$ full-rank advantage is pooled-data --- directly replicating the Phase~C2c full-scale conclusion at simplified scale with 15 seeds per arm.
 

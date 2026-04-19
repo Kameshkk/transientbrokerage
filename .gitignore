@@ -1,6 +1,20 @@
 plans/
 data/
 archive/*/data/
+
+# Allow the broker-advantage publication figures (PDF vector output) through
+# the data/ ignore rule. Each intermediate parent directory must be re-included.
+!data/
+!data/figures/
+!data/figures/broker_advantage/
+!data/figures/broker_advantage/*.pdf
+# But keep everything else under data/ ignored:
+data/sims/
+data/summaries/
+data/sysimage/
+data/figures/exploration/
+data/figures/phase_diagram/
+data/figures/quick_diagnostic.png
 CLAUDE.md
 AGENTS.md
 
