@@ -348,11 +348,46 @@ Base.@kwdef mutable struct PeriodAccumulators
     access_count::Int = 0       # counterparty was NOT a neighbor of demander
     assessment_count::Int = 0   # counterparty WAS a neighbor
 
+    # Broker-advantage pre-match classification (base model).
+    # Computed using edge_pre and prior_pair_history_pre snapshots captured
+    # before finalize_accepted_proposal! mutates G or partner_count.
+    n_broker_access_new_edge::Int = 0                   # j was NOT a neighbor of i pre-match
+    n_broker_assessment_reachable_no_prior::Int = 0     # j was a neighbor but no prior pair history
+    n_broker_assessment_prior_partner::Int = 0          # i and j had prior realized match history
+    n_broker_matches_classified::Int = 0                # sum of the three (sanity check)
+
     # Outsourcing rate and demand
     n_demanders::Int = 0
     n_outsourced::Int = 0           # demanders who chose the broker channel
     outsourced_slots::Int = 0       # demand slots routed through the broker channel
     total_demand::Int = 0           # total demand slots across all demanders
+
+    # Broker-advantage demand/fill/value logging. These mirror the runbook's
+    # self_demand_slots / broker_demand_slots / *_filled_slots terminology.
+    # self_demand_slots + broker_demand_slots == total_demand (by construction).
+    self_demand_slots::Int = 0
+    broker_demand_slots::Int = 0
+    self_filled_slots::Int = 0
+    broker_filled_slots::Int = 0
+    q_self_sum::Float64 = 0.0
+    q_broker_sum::Float64 = 0.0
+    n_agents_tried_broker::Int = 0       # cumulative: count of agents with tried_broker=true
+    n_agents_abandoned_broker::Int = 0   # tried broker AND satisfaction_broker < satisfaction_self
+    welfare_agents_period::Float64 = 0.0   # realized pair output minus agent-side costs
+    welfare_broker_period::Float64 = 0.0   # phi * broker_filled_slots
+
+    # Broker fill-failure breakdown (base model). broker_unfilled_slots always
+    # equals broker_demand_slots − broker_filled_slots. The two reason buckets
+    # attribute each unfilled slot to one of:
+    #   broker_unfilled_pref_exhausted:  demander's broker preference list was
+    #     walked to the end without holding an accepted proposal (every
+    #     candidate either failed admissibility or was displaced).
+    #   broker_unfilled_capacity_limited: max rounds were reached while the
+    #     demander still had untried preferences — typically the partners
+    #     ran out of open slots before the demander's turn to commit.
+    broker_unfilled_slots::Int = 0
+    broker_unfilled_pref_exhausted::Int = 0
+    broker_unfilled_capacity_limited::Int = 0
 
     # Prediction/outcome pairs from actual matches (subject to selection bias)
     agent_predicted::Vector{Float64} = Float64[]
@@ -373,6 +408,30 @@ Base.@kwdef mutable struct PeriodAccumulators
     broker_holdout_bias::Float64 = NaN
     broker_holdout_rank::Float64 = NaN
     broker_holdout_rmse::Float64 = NaN
+    # Pooled holdout metrics — Spearman and R² computed by concatenating every
+    # sampled (agent_i, partner_j) triple across all sampled i's into one big
+    # vector per predictor. Tests the predictor's ability to rank/fit across
+    # DIFFERENT agents, not only within a single agent's partner set.
+    agent_holdout_r2_pooled::Float64 = NaN
+    broker_holdout_r2_pooled::Float64 = NaN
+    agent_holdout_rank_pooled::Float64 = NaN
+    broker_holdout_rank_pooled::Float64 = NaN
+    # Within-agent de-meaned R² — per-agent R² computed after subtracting the
+    # within-agent means of pred and true, then averaged across agents. Removes
+    # any advantage the broker gets from simply modelling a per-agent offset.
+    agent_holdout_r2_demeaned::Float64 = NaN
+    broker_holdout_r2_demeaned::Float64 = NaN
+    # Two-way residualized holdout metrics — the pooled holdout is treated as a
+    # partially observed (i, j) matrix; grand, row (per focal i), and column
+    # (per partner j) main effects are removed from both the truth and each
+    # predictor; R² and Spearman rank are recomputed on the pair-specific
+    # residuals. A predictor that merely captures global quality (like
+    # :BlindBroker would) has low r²/rank on these; only predictors that
+    # capture pair-conditioned signal score well.
+    agent_holdout_r2_residualized::Float64 = NaN
+    broker_holdout_r2_residualized::Float64 = NaN
+    agent_holdout_rank_residualized::Float64 = NaN
+    broker_holdout_rank_residualized::Float64 = NaN
 
     # Roster
     roster_size::Int = 0
@@ -393,10 +452,27 @@ function reset_accumulators!(a::PeriodAccumulators)
     empty!(a.principal_acquired_ids)
     a.access_count = 0
     a.assessment_count = 0
+    a.n_broker_access_new_edge = 0
+    a.n_broker_assessment_reachable_no_prior = 0
+    a.n_broker_assessment_prior_partner = 0
+    a.n_broker_matches_classified = 0
     a.n_demanders = 0
     a.n_outsourced = 0
     a.outsourced_slots = 0
     a.total_demand = 0
+    a.self_demand_slots = 0
+    a.broker_demand_slots = 0
+    a.self_filled_slots = 0
+    a.broker_filled_slots = 0
+    a.q_self_sum = 0.0
+    a.q_broker_sum = 0.0
+    a.n_agents_tried_broker = 0
+    a.n_agents_abandoned_broker = 0
+    a.welfare_agents_period = 0.0
+    a.welfare_broker_period = 0.0
+    a.broker_unfilled_slots = 0
+    a.broker_unfilled_pref_exhausted = 0
+    a.broker_unfilled_capacity_limited = 0
     empty!(a.agent_predicted)
     empty!(a.agent_realized)
     empty!(a.broker_predicted)
@@ -412,6 +488,16 @@ function reset_accumulators!(a::PeriodAccumulators)
     a.broker_holdout_bias = NaN
     a.broker_holdout_rank = NaN
     a.broker_holdout_rmse = NaN
+    a.agent_holdout_r2_pooled = NaN
+    a.broker_holdout_r2_pooled = NaN
+    a.agent_holdout_rank_pooled = NaN
+    a.broker_holdout_rank_pooled = NaN
+    a.agent_holdout_r2_demeaned = NaN
+    a.broker_holdout_r2_demeaned = NaN
+    a.agent_holdout_r2_residualized = NaN
+    a.broker_holdout_r2_residualized = NaN
+    a.agent_holdout_rank_residualized = NaN
+    a.broker_holdout_rank_residualized = NaN
     a.roster_size = 0
     a.broker_access_size = 0
     return nothing
@@ -478,6 +564,29 @@ struct ModelParams
     T::Int                       # total periods (default 200)
     T_burn::Int                  # burn-in periods (default 30)
     seed::Int                    # RNG seed
+
+    # Decoupled fee/cost rates (broker-advantage study).
+    # Default to search_cost_rate in default_params when not specified — preserves
+    # existing behavior of the legacy single-rate calibration.
+    broker_fee_rate::Float64      # rate used to compute phi (successful broker fee)
+    self_search_cost_rate::Float64 # rate used to compute c_s (self-demanded slot cost)
+
+    # Broker roster share (fraction of population kept on the standing roster).
+    # Default 0.20 matches the legacy ROSTER_TARGET_FRAC constant. Exposed as a
+    # parameter so the transparency_access sweep can vary it.
+    alpha_R::Float64
+
+    # Ablation mode for broker-advantage experiments.
+    # :none (default) leaves the base model unchanged. Supported modes:
+    #   :NoBroker                — force all demand to :self (paired counterfactual).
+    #   :NoRegime                — set delta=0 at env construction.
+    #   :NoAccessBroker          — broker may only recommend current neighbors of demander.
+    #   :FrozenGraph             — successful matches do not add graph edges.
+    #   :NoTurnover              — entry/exit disabled (equivalent to eta=0).
+    #   :FreezeBrokerLearning    — broker NN not retrained after initial warm-up.
+    #   :BlindBroker             — (not yet implemented; errors at initialize_model).
+    #   :EqualCapacityBroker     — (not yet implemented; errors at initialize_model).
+    ablation::Symbol
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -531,6 +640,13 @@ Base.@kwdef mutable struct SimWorkspace
     broker_clients_ws::Vector{Int} = Int[]
     was_connected_i::Vector{Int} = Int[]  # pre-formation edge snapshot
     was_connected_j::Vector{Int} = Int[]
+    # For each (was_connected_i[k], was_connected_j[k]) pre-match pair, records
+    # whether i and j had any prior realized match history (partner_count > 0)
+    # BEFORE the current match edge/history updates. Base-model invariant:
+    # partner_count > 0 ⟹ edge exists pre-match, so this is meaningful only for
+    # pairs already present in wc_i/wc_j. Non-connected-pre brokered pairs are
+    # always access_new_edge and therefore never carry a prior-history flag.
+    was_prior_partner::Vector{Bool} = Bool[]
     remaining_cap::Vector{Int} = Int[]    # capacity tracker for match formation
     principal_reserved_capacity::Vector{Int} = Int[]
     principal_reserved_touched::Vector{Int} = Int[]

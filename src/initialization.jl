@@ -98,6 +98,15 @@ Complete model initialization following the pseudocode (§9, Steps I.1-I.13):
 8. Neural network initial training (E_init steps)
 """
 function initialize_model(params::ModelParams; sort_by_pc1::Bool = false)::ModelState
+    # :BlindBroker is implemented by zeroing the focal-agent half of every
+    # broker input (prediction batches in search.jl, single-prediction calls in
+    # step.jl holdout, and training examples in learning.jl). Architecture is
+    # unchanged. :EqualCapacityBroker remains deferred — it needs the broker NN
+    # rebuilt at agent capacity, which touches init and learning paths.
+    if params.ablation == :EqualCapacityBroker
+        error("ablation :EqualCapacityBroker is not yet implemented in this build; see " *
+              "prompts/BROKER_ADVANTAGE_INSTRUMENTATION_SPEC.md §12.4 and the Phase C4 plan.")
+    end
     rng = StableRNG(params.seed)
     p = params
     d = p.d
@@ -111,7 +120,10 @@ function initialize_model(params::ModelParams; sort_by_pc1::Bool = false)::Model
     # (perturbation of a random curve position)
 
     # ── I.4: Matching environment (A, B, c) ──
-    env = generate_matching_env(d, p.rho, p.delta, p.sigma_eps, sorted_types, rng;
+    # :NoRegime ablation zeroes delta at env construction; all downstream uses of
+    # env.delta therefore compute the base interaction with gain == 1.
+    effective_delta = p.ablation == :NoRegime ? 0.0 : p.delta
+    env = generate_matching_env(d, p.rho, effective_delta, p.sigma_eps, sorted_types, rng;
                                  sigma_x=p.sigma_x, curve_geo=geo)
 
     # ── I.5-I.6: Calibration ──
@@ -122,7 +134,7 @@ function initialize_model(params::ModelParams; sort_by_pc1::Bool = false)::Model
 
     # ── I.8: Broker setup ──
     broker_node = N + 1
-    n_roster_seed = roster_target_size(N)
+    n_roster_seed = roster_target_size(N, p.alpha_R)
 
     # Initialize broker NN
     broker_nn = init_neural_net(2 * d, p.h_b, rng)

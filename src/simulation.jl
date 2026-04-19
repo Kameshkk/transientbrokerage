@@ -127,6 +127,65 @@ function collect_period_metrics(state::ModelState)
     mean_sat_broker = mean(ag.satisfaction_broker for ag in agents)
     degree_stats = degree_summary(state)
 
+    # ── Broker-advantage derived metrics (base model) ──
+    # Fill rates and per-demand-slot value; NaN when the denominator is zero.
+    self_dem = a.self_demand_slots
+    brk_dem = a.broker_demand_slots
+    tot_dem = a.total_demand
+    self_fill = a.self_filled_slots
+    brk_fill = a.broker_filled_slots
+    self_fill_rate = self_dem > 0 ? self_fill / self_dem : NaN
+    broker_fill_rate = brk_dem > 0 ? brk_fill / brk_dem : NaN
+    fill_rate_gap = (isnan(self_fill_rate) || isnan(broker_fill_rate)) ? NaN :
+                    broker_fill_rate - self_fill_rate
+    pi_broker_slot = tot_dem > 0 ? brk_dem / tot_dem : NaN
+
+    q_self_per_demand_slot = self_dem > 0 ? a.q_self_sum / self_dem : NaN
+    q_broker_per_demand_slot = brk_dem > 0 ? a.q_broker_sum / brk_dem : NaN
+    q_self_mean_cond = self_fill > 0 ? a.q_self_sum / self_fill : NaN
+    q_broker_mean_cond = brk_fill > 0 ? a.q_broker_sum / brk_fill : NaN
+
+    phi_now = state.cal.phi
+    c_s_now = state.cal.c_s
+    net_self_per_demand_slot = isnan(q_self_per_demand_slot) ? NaN :
+                               q_self_per_demand_slot - c_s_now
+    # Broker net value per demanded slot: gross minus the realized-fee expectation
+    # (phi on successful placements only). At fill_rate=0 the fee burden is 0.
+    net_broker_per_demand_slot = if isnan(q_broker_per_demand_slot)
+        NaN
+    else
+        q_broker_per_demand_slot - phi_now * (isnan(broker_fill_rate) ? 0.0 : broker_fill_rate)
+    end
+    net_value_gap = (isnan(net_self_per_demand_slot) || isnan(net_broker_per_demand_slot)) ? NaN :
+                    net_broker_per_demand_slot - net_self_per_demand_slot
+
+    # Decomposition (runbook §3.2). All three components and net_value_gap
+    # should sum to within floating-point tolerance when neither channel is empty.
+    quality_selection_component = (isnan(broker_fill_rate) || isnan(q_self_mean_cond) ||
+                                   isnan(q_broker_mean_cond)) ? NaN :
+                                  broker_fill_rate * (q_broker_mean_cond - q_self_mean_cond)
+    fill_access_component = (isnan(broker_fill_rate) || isnan(self_fill_rate) ||
+                             isnan(q_self_mean_cond)) ? NaN :
+                            (broker_fill_rate - self_fill_rate) * q_self_mean_cond
+    fee_cost_component = isnan(broker_fill_rate) ? NaN :
+                         c_s_now - broker_fill_rate * phi_now
+
+    # Access/assessment fractions over classified brokered matches.
+    nbm = a.n_broker_matches_classified
+    access_new_edge_frac_brk = nbm > 0 ? a.n_broker_access_new_edge / nbm : NaN
+    assessment_reachable_no_prior_frac_brk = nbm > 0 ?
+        a.n_broker_assessment_reachable_no_prior / nbm : NaN
+    assessment_prior_partner_frac_brk = nbm > 0 ?
+        a.n_broker_assessment_prior_partner / nbm : NaN
+    assessment_total_frac_brk = nbm > 0 ?
+        (a.n_broker_assessment_reachable_no_prior +
+         a.n_broker_assessment_prior_partner) / nbm : NaN
+
+    # Adoption heterogeneity fractions.
+    tried_broker_frac = N > 0 ? a.n_agents_tried_broker / N : NaN
+    abandoned_broker_frac = a.n_agents_tried_broker > 0 ?
+        a.n_agents_abandoned_broker / a.n_agents_tried_broker : NaN
+
     return (
         period = state.period,
         # Match counts
@@ -161,6 +220,31 @@ function collect_period_metrics(state::ModelState)
         r2_gap = a.broker_holdout_r2 - a.agent_holdout_r2,
         rank_gap = a.broker_holdout_rank - a.agent_holdout_rank,
         rmse_gap = a.agent_holdout_rmse - a.broker_holdout_rmse,  # positive = broker more accurate
+        # Broker-advantage diagnostic metrics (runbook sanity spec): pooled +
+        # within-agent de-meaned flavours. Existing rank_gap and r2_gap are
+        # within-agent (per-agent averaged). The three new gaps are:
+        #   rank_gap_pooled       = broker_holdout_rank_pooled - agent_holdout_rank_pooled
+        #   r2_gap_pooled         = broker_holdout_r2_pooled   - agent_holdout_r2_pooled
+        #   r2_gap_demeaned       = broker_holdout_r2_demeaned - agent_holdout_r2_demeaned
+        agent_holdout_rank_pooled = a.agent_holdout_rank_pooled,
+        broker_holdout_rank_pooled = a.broker_holdout_rank_pooled,
+        rank_gap_pooled = a.broker_holdout_rank_pooled - a.agent_holdout_rank_pooled,
+        agent_holdout_r2_pooled = a.agent_holdout_r2_pooled,
+        broker_holdout_r2_pooled = a.broker_holdout_r2_pooled,
+        r2_gap_pooled = a.broker_holdout_r2_pooled - a.agent_holdout_r2_pooled,
+        agent_holdout_r2_demeaned = a.agent_holdout_r2_demeaned,
+        broker_holdout_r2_demeaned = a.broker_holdout_r2_demeaned,
+        r2_gap_demeaned = a.broker_holdout_r2_demeaned - a.agent_holdout_r2_demeaned,
+        # Two-way residualized metrics: subtract TRUE grand+row+col means from
+        # the predictor before evaluating, then compute R² / Spearman on the
+        # pair-specific residual. Tests whether the predictor captures the
+        # INTERACTION component, not the main effects.
+        agent_holdout_r2_residualized = a.agent_holdout_r2_residualized,
+        broker_holdout_r2_residualized = a.broker_holdout_r2_residualized,
+        r2_gap_residualized = a.broker_holdout_r2_residualized - a.agent_holdout_r2_residualized,
+        agent_holdout_rank_residualized = a.agent_holdout_rank_residualized,
+        broker_holdout_rank_residualized = a.broker_holdout_rank_residualized,
+        rank_gap_residualized = a.broker_holdout_rank_residualized - a.agent_holdout_rank_residualized,
         # Selected-sample prediction quality (pooled over actual matches)
         agent_selected_rank = agent_sel.rank_corr,
         agent_selected_r2 = agent_sel.r_squared,
@@ -208,6 +292,60 @@ function collect_period_metrics(state::ModelState)
         betweenness = state.cached_network.betweenness,
         constraint = state.cached_network.constraint,
         effective_size = state.cached_network.effective_size,
+        # ── Broker-advantage instrumentation (additive; existing columns above are
+        #    preserved by name and position per BROKER_ADVANTAGE_AGENT_RUNBOOK §1.3).
+        # Demand / fill counts by channel.
+        self_demand_slots = self_dem,
+        broker_demand_slots = brk_dem,
+        self_filled_slots = self_fill,
+        broker_filled_slots = brk_fill,
+        pi_broker_slot = pi_broker_slot,
+        self_fill_rate = self_fill_rate,
+        broker_fill_rate = broker_fill_rate,
+        fill_rate_gap = fill_rate_gap,
+        # Match-quality sums and derived per-slot values.
+        q_self_sum = a.q_self_sum,
+        q_broker_sum = a.q_broker_sum,
+        q_self_mean_cond = q_self_mean_cond,
+        q_broker_mean_cond = q_broker_mean_cond,
+        q_self_per_demand_slot = q_self_per_demand_slot,
+        q_broker_per_demand_slot = q_broker_per_demand_slot,
+        net_self_per_demand_slot = net_self_per_demand_slot,
+        net_broker_per_demand_slot = net_broker_per_demand_slot,
+        net_value_gap = net_value_gap,
+        # Decomposition.
+        quality_selection_component = quality_selection_component,
+        fill_access_component = fill_access_component,
+        fee_cost_component = fee_cost_component,
+        # Access/assessment three-way split (base model, standard brokered only).
+        n_broker_access_new_edge = a.n_broker_access_new_edge,
+        n_broker_assessment_reachable_no_prior = a.n_broker_assessment_reachable_no_prior,
+        n_broker_assessment_prior_partner = a.n_broker_assessment_prior_partner,
+        n_broker_matches_classified = a.n_broker_matches_classified,
+        access_new_edge_frac_brk = access_new_edge_frac_brk,
+        assessment_reachable_no_prior_frac_brk = assessment_reachable_no_prior_frac_brk,
+        assessment_prior_partner_frac_brk = assessment_prior_partner_frac_brk,
+        assessment_total_frac_brk = assessment_total_frac_brk,
+        # Adoption heterogeneity (base model).
+        n_agents_tried_broker = a.n_agents_tried_broker,
+        tried_broker_frac = tried_broker_frac,
+        n_agents_abandoned_broker = a.n_agents_abandoned_broker,
+        abandoned_broker_frac = abandoned_broker_frac,
+        # Period welfare and calibration metadata.
+        welfare_agents_period = a.welfare_agents_period,
+        welfare_broker_period = a.welfare_broker_period,
+        # Broker fill-failure breakdown (see BROKER_ADVANTAGE_INSTRUMENTATION_SPEC
+        # §6.1; additive: pref_exhausted + capacity_limited == broker_unfilled_slots).
+        broker_unfilled_slots = a.broker_unfilled_slots,
+        broker_unfilled_pref_exhausted = a.broker_unfilled_pref_exhausted,
+        broker_unfilled_capacity_limited = a.broker_unfilled_capacity_limited,
+        phi = phi_now,
+        c_s = c_s_now,
+        broker_fee_rate = p.broker_fee_rate,
+        self_search_cost_rate = p.self_search_cost_rate,
+        search_cost_rate = p.search_cost_rate,
+        q_cal = state.cal.q_cal,
+        r_out = state.cal.r,
     )
 end
 

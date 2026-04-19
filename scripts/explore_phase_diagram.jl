@@ -38,7 +38,7 @@ sweep_type = :rho_s  # default
 for a in ARGS
     a in ("--rerun", "--m1") && continue
     if a in ("rho_s", "rho_eta", "rho_delta", "rho_snr")
-        sweep_type = Symbol(a)
+        global sweep_type = Symbol(a)
     else
         @warn "Unknown argument: $a"
     end
@@ -148,7 +148,7 @@ else
 
     cell = 0
     for (j, yv) in enumerate(y_vals), (i, rho) in enumerate(rho_vals)
-        cell += 1
+        global cell += 1
         print("  [$cell/$n_total] rho=$rho, $y_key=$yv ... ")
 
         kw = Dict{Symbol, Any}(:N => N_run, :T => T_run, :rho => rho, y_key => yv)

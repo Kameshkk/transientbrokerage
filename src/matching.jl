@@ -41,7 +41,8 @@ function counterparty_offer_score(pm::ProposedMatch,
 end
 
 """
-    finalize_accepted_proposal!(accepted, pm, agents, broker, env, G, rng; Ax_buf, Bx_buf)
+    finalize_accepted_proposal!(accepted, pm, agents, broker, env, G, rng; Ax_buf, Bx_buf,
+                                frozen_graph = false)
 
 Realize one accepted proposal, update histories/network/state, and append the
 accepted-match record.
@@ -55,7 +56,8 @@ function finalize_accepted_proposal!(accepted::Vector{AcceptedMatch},
                                      rng::AbstractRNG;
                                      Ax_buf::Vector{Float64},
                                      Bx_buf::Vector{Float64},
-                                     reserved_capacity::Union{Vector{Int}, Nothing} = nothing)
+                                     reserved_capacity::Union{Vector{Int}, Nothing} = nothing,
+                                     frozen_graph::Bool = false)
     i = pm.demander_id
     j = pm.counterparty_id
 
@@ -77,7 +79,9 @@ function finalize_accepted_proposal!(accepted::Vector{AcceptedMatch},
         if pm.channel == :broker
             record_broker_history!(broker, agents[i].type, agents[j].type, q_realized)
         end
-        add_match_edge!(G, i, j)
+        # :FrozenGraph ablation skips the edge mutation to measure pure
+        # informational value decoupled from structural-hole erosion.
+        frozen_graph || add_match_edge!(G, i, j)
         push!(agents[i].active_matches, ActiveMatch(j, false, pm.channel))
         push!(agents[j].active_matches, ActiveMatch(i, false, pm.channel))
     end
@@ -170,6 +174,7 @@ function round_match_formation!(demand_agent_ids::Vector{Int},
     resize!(round_capacity, N)
     wc_i = ws.was_connected_i; empty!(wc_i)
     wc_j = ws.was_connected_j; empty!(wc_j)
+    wc_prior = ws.was_prior_partner; empty!(wc_prior)
     if length(ws.Ax_buf) != d
         ws.Ax_buf = Vector{Float64}(undef, d)
         ws.Bx_buf = Vector{Float64}(undef, d)
@@ -257,6 +262,7 @@ function round_match_formation!(demand_agent_ids::Vector{Int},
                 ws=ws, demander_slots=broker_slot_caps,
                 reserved_capacity=reserved_capacity,
                 round_capacity=round_capacity,
+                restrict_graph = params.ablation == :NoAccessBroker ? G : nothing,
             )
         else
             empty!(broker_pref_matches)
@@ -287,6 +293,9 @@ function round_match_formation!(demand_agent_ids::Vector{Int},
                     if has_edge(G, pm.demander_id, pm.counterparty_id)
                         push!(wc_i, pm.demander_id)
                         push!(wc_j, pm.counterparty_id)
+                        # Snapshot pair history BEFORE finalize_accepted_proposal!
+                        # mutates partner_count via update_partner_mean!.
+                        push!(wc_prior, agents[pm.demander_id].partner_count[pm.counterparty_id] > 0)
                     end
                     push!(pref_matches, pm)
                     push!(pref_owner, pos)
@@ -387,11 +396,13 @@ function round_match_formation!(demand_agent_ids::Vector{Int},
         end
 
         round_accepts = principal_round_accepts
+        fg = params.ablation == :FrozenGraph
         @inbounds for pos in eachindex(active_positions)
             prop_idx = outgoing_prop_idx[pos]
             prop_idx == 0 && continue
             finalize_accepted_proposal!(accepted, pref_matches[prop_idx], agents, broker, env, G, rng;
-                                        Ax_buf=Ax_buf, Bx_buf=Bx_buf)
+                                        Ax_buf=Ax_buf, Bx_buf=Bx_buf,
+                                        frozen_graph = fg)
             remaining_demand[active_positions[pos]] -= 1
             round_accepts += 1
         end

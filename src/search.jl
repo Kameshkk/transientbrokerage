@@ -4,7 +4,7 @@
 Round-search preference construction and broker quality-cache helpers.
 """
 
-using Graphs: neighbors
+using Graphs: neighbors, SimpleGraph, has_edge
 using Random: AbstractRNG
 using StatsBase: sample
 
@@ -230,6 +230,10 @@ function prepare_broker_quality_matrix!(broker::Broker,
     H_batch = ws.H_batch
     Y_batch = ws.Y_batch
 
+    # :BlindBroker — zero the focal-agent input at batch construction so the
+    # broker's candidate-scoring predictions do not use x_i. The training-time
+    # blinding is applied separately in learning.jl::train_broker_nn!.
+    blind = params.ablation == :BlindBroker
     col = 0
     @inbounds for ri in 1:n_roster
         rid = access_ids[ri]
@@ -242,7 +246,7 @@ function prepare_broker_quality_matrix!(broker::Broker,
                 col += 1
                 xi = agents[did].type
                 for k in 1:d
-                    Z_batch[k, col] = xi[k]
+                    Z_batch[k, col] = blind ? 0.0 : xi[k]
                     Z_batch[d + k, col] = xj[k]
                 end
             end
@@ -378,7 +382,8 @@ function append_broker_round_preferences_from_cache!(out::Vector{ProposedMatch},
                                                      ws::SimWorkspace,
                                                      demander_slots::Union{Vector{Int}, Nothing} = nothing,
                                                      reserved_capacity::Union{Vector{Int}, Nothing} = nothing,
-                                                     round_capacity::Union{Vector{Int}, Nothing} = nothing)
+                                                     round_capacity::Union{Vector{Int}, Nothing} = nothing,
+                                                     restrict_graph::Union{SimpleGraph, Nothing} = nothing)
     empty!(out)
     resize!(counts, length(demander_ids))
     fill!(counts, 0)
@@ -422,6 +427,10 @@ function append_broker_round_preferences_from_cache!(out::Vector{ProposedMatch},
             val <= r && break
             rid = period_access_ids[col]
             did == rid && continue
+            # :NoAccessBroker ablation: only recommend candidates already in N_G(i).
+            if !isnothing(restrict_graph) && !has_edge(restrict_graph, did, rid)
+                continue
+            end
             push!(out, ProposedMatch(did, rid, :broker, val, false, NaN, NaN))
             counts[di] += 1
         end

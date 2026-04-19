@@ -228,7 +228,9 @@ function calibrate(env::MatchingEnv,
     q_cal = total / n_samples
     r = R_BASE_FRAC * q_cal
     surplus_scale = q_cal - r
-    phi = params.search_cost_rate * surplus_scale
-    c_s = params.search_cost_rate * surplus_scale
+    # Decoupled rates; default_params sets these equal to search_cost_rate when
+    # the user does not specify a split, preserving the legacy behavior.
+    phi = params.broker_fee_rate * surplus_scale
+    c_s = params.self_search_cost_rate * surplus_scale
     return CalibrationConstants(q_cal, r, phi, c_s)
 end

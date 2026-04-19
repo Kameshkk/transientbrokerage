@@ -23,9 +23,20 @@ const ROSTER_TARGET_FRAC = 0.20
 """
     roster_target_size(N::Int) -> Int
 
-Fixed target roster size implied by the standing broker roster share.
+Fixed target roster size implied by the default standing broker roster share
+(legacy 0.20 constant). Preserved for backward compatibility with callers that
+do not thread ModelParams through.
 """
 roster_target_size(N::Int) = min(N, ceil(Int, ROSTER_TARGET_FRAC * N))
+
+"""
+    roster_target_size(N::Int, alpha_R::Float64) -> Int
+
+Target roster size parameterised by the broker-advantage `alpha_R`. Used by the
+`transparency_access` sweep to vary broker roster share in {0.05, 0.10, 0.20, 0.40}.
+Reduces to `ROSTER_TARGET_FRAC` when `alpha_R` equals the legacy default.
+"""
+roster_target_size(N::Int, alpha_R::Float64) = min(N, ceil(Int, alpha_R * N))
 
 """
     default_params(; seed=42, kwargs...)::ModelParams
@@ -68,11 +79,24 @@ function default_params(; seed::Int = 42, kwargs...)::ModelParams
         :T => 200,
         :T_burn => 30,
         :seed => seed,
+        # Decoupled fee/cost rates. Sentinel `nothing` means "inherit from
+        # search_cost_rate" — preserves the legacy single-rate calibration.
+        :broker_fee_rate => nothing,
+        :self_search_cost_rate => nothing,
+        :alpha_R => ROSTER_TARGET_FRAC,
+        :ablation => :none,
     )
     for (kw, v) in kwargs
         haskey(defaults, kw) || error("Unknown parameter: $kw")
         defaults[kw] = v
     end
+
+    # Resolve fee/cost split: unspecified values inherit from search_cost_rate.
+    bfr = defaults[:broker_fee_rate]
+    sscr = defaults[:self_search_cost_rate]
+    broker_fee_rate = isnothing(bfr) ? defaults[:search_cost_rate] : Float64(bfr)
+    self_search_cost_rate = isnothing(sscr) ? defaults[:search_cost_rate] : Float64(sscr)
+
     p = ModelParams(
         defaults[:N],
         defaults[:d],
@@ -99,6 +123,10 @@ function default_params(; seed::Int = 42, kwargs...)::ModelParams
         defaults[:T],
         defaults[:T_burn],
         defaults[:seed],
+        broker_fee_rate,
+        self_search_cost_rate,
+        Float64(defaults[:alpha_R]),
+        Symbol(defaults[:ablation]),
     )
     validate_params(p)
     return p
@@ -134,6 +162,12 @@ function validate_params(p::ModelParams)
     # Economics
     @assert 0.0 < p.omega < 1.0 "omega must be in (0, 1), got $(p.omega)"
     @assert 0.0 <= p.search_cost_rate <= 1.0 "search_cost_rate must be in [0, 1], got $(p.search_cost_rate)"
+    @assert 0.0 <= p.broker_fee_rate <= 1.0 "broker_fee_rate must be in [0, 1], got $(p.broker_fee_rate)"
+    @assert 0.0 <= p.self_search_cost_rate <= 1.0 "self_search_cost_rate must be in [0, 1], got $(p.self_search_cost_rate)"
+    @assert 0.0 < p.alpha_R <= 1.0 "alpha_R must be in (0, 1], got $(p.alpha_R)"
+    @assert p.ablation in (:none, :NoBroker, :NoRegime, :NoAccessBroker, :FrozenGraph,
+                            :NoTurnover, :FreezeBrokerLearning, :BlindBroker,
+                            :EqualCapacityBroker) "unknown ablation: $(p.ablation)"
 
     # Neural network
     @assert p.eta_lr > 0.0 "eta_lr must be > 0, got $(p.eta_lr)"

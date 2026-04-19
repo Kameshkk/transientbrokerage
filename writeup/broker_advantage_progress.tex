@@ -1,0 +1,441 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{enumitem}
+
+\title{Instrumenting a Matching-Market Agent-Based Simulator for Broker-Advantage Attribution:\\
+  Model Changes, Diagnostic Controls, and Results}
+\author{Work in progress --- progress report}
+\date{April 19, 2026}
+
+\newcommand{\xvec}{\mathbf{x}}
+\newcommand{\cvec}{\mathbf{c}}
+\newcommand{\Ebb}{\mathbb{E}}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We instrument \texttt{TransientBrokerage.jl} --- a base-model matching-market ABM --- to measure when a central broker provides \emph{pair-conditioned informational} value to agents, as distinct from a pure \emph{data-pooling} or \emph{capacity} advantage. Standard holdout metrics conflate the three. We add (i) a decoupled fee/cost split, (ii) per-period demand/fill/value counters with an algebraic decomposition into quality-selection, fill-access, and fee-cost components, (iii) pre-match access/assessment flags, (iv) seven ablation modes --- including a \textsc{BlindBroker} that zeros the focal-agent input while preserving pooled training, (v) pooled and within-agent de-meaned holdout $R^2$/rank metrics, and (vi) a two-way residualized holdout metric that isolates the pair-specific signal. Applied to diagnostic cells at $N{=}1000, T{=}200$, the instrumentation shows that the broker's apparent advantage under a degenerate additively-separable DGP ($\rho{=}1$, "EasyQuality") is 94\% a data-pooling artifact, while at the regime-gated anchors (Default, HardPairwise) pair-conditioned input drives most of the gap. The existing scripts remain byte-identical on the canonical seed.
+\end{abstract}
+
+\section{Base model}
+\label{sec:model}
+Each period $t$ a population of $N$ agents with types $\xvec_i \in \mathbb{R}^d$ on the unit sphere demand matches. For a pair $(i,j)$ the deterministic match signal is
+\begin{equation}
+\label{eq:match}
+f(\xvec_i,\xvec_j) \;=\; \underbrace{\rho \cdot \tfrac{1}{2}\!\left(\xvec_i^\top \cvec + \xvec_j^\top \cvec\right)}_{\text{additive quality}}
+\;+\; \underbrace{(1-\rho)\cdot g(\xvec_i,\xvec_j)\cdot \xvec_i^\top A\,\xvec_j}_{\text{gain-modulated interaction}},
+\end{equation}
+with the regime gain
+\begin{equation}
+\label{eq:gain}
+g(\xvec_i,\xvec_j) \;=\; 1 + \delta\,\operatorname{sign}(\xvec_i^\top B\,\xvec_j).
+\end{equation}
+$A$ is SPD, $B$ is symmetric and weighted-orthogonalised against $A$, $\cvec$ is an "ideal type" drawn from a sinusoidal curve, $\rho \in [0,1]$ trades additive quality against pairwise interaction, and $\delta \in [0,1]$ controls the magnitude of the two-regime gate. Realised output is $q_{ij} = Q + f(\xvec_i,\xvec_j) + \varepsilon_{ij}$ with $\varepsilon_{ij} \sim \mathcal{N}(0,\sigma_\varepsilon^2)$ and offset $Q = 1$. Calibration fixes $q_{\mathrm{cal}} = \Ebb[Q + f]$ by Monte Carlo and $r = 0.6\,q_{\mathrm{cal}}$ is the outside option. Original default: $(N,T,T_{\mathrm{burn}},d,s,k,\rho,\delta,\sigma_x,\sigma_\varepsilon)=(1000,200,30,8,8,6,0.5,0.5,0.5,0.1)$; simplified screening uses $(N,T,d,k)=(300,120,6,4)$.
+
+Each period every agent draws $d_i \sim \operatorname{Bin}(K{-}m_i, p_{\mathrm{demand}})$ demand slots where $m_i$ is already-active matches and capacity $K{=}5$. Agent $i$ chooses channel $\in\{\texttt{:self},\texttt{:broker}\}$ by comparing EWMA satisfaction indices. Self-search draws $n_\text{strangers}$ random non-neighbours plus all neighbours; the broker offers its current accessible roster ranked by a neural-network prediction over the pair input $(\xvec_i,\xvec_j) \in \mathbb{R}^{2d}$. Round-by-round deferred acceptance finalises matches.
+
+\section{Instrumentation changes}
+\label{sec:instrumentation}
+All edits are additive and backward-compatible: the canonical preflight (\texttt{quick\_diagnostic.jl} at \texttt{seed=42}) produces \emph{byte-identical} numbers pre- and post-instrumentation (outsourcing rate $0.266$, $R^2$ gap $0.426$).
+
+\subsection{Decoupled fee and cost rates}
+Legacy model used a single \texttt{search\_cost\_rate} $s$ for both the broker fee and the self-search cost:
+\[
+\phi = c_s = s\,(q_{\mathrm{cal}} - r).
+\]
+The broker-advantage analysis requires separating these. We add two parameters, with defaults that inherit from $s$:
+\begin{align}
+\phi &= s_{\mathrm{broker}}\,(q_{\mathrm{cal}}-r), & s_{\mathrm{broker}} &\leftarrow \texttt{broker\_fee\_rate}\text{ (default }s\text{)},\\
+c_s  &= s_{\mathrm{self}}  \,(q_{\mathrm{cal}}-r), & s_{\mathrm{self}} &\leftarrow \texttt{self\_search\_cost\_rate}\text{ (default }s\text{)}.
+\end{align}
+Agent satisfaction on the \emph{self} channel updates as $\tilde q^{\text{self}} = \sum_{m \in \mathcal{M}_i^\text{self}} q_m / d_i - c_s$; on the \emph{broker} channel as $\tilde q^{\text{broker}} = (\sum_{m \in \mathcal{M}_i^\text{brk}} q_m - \phi\,|\mathcal{M}_i^\text{brk,std}|)/d_i$. Both use \emph{demanded slots} $d_i$ as denominator; the self-search cost is charged on every demanded slot whether filled or not, while $\phi$ is charged only on successful standard broker placements. EWMA update $\operatorname{Sat} \leftarrow (1-\omega)\operatorname{Sat} + \omega\,\tilde q$ with $\omega=0.2$.
+
+\subsection{Demand, fill, and value counters; algebraic decomposition}
+We add, per period:
+\begin{itemize}[leftmargin=1.5em]
+\item \texttt{self\_demand\_slots} and \texttt{broker\_demand\_slots} ($d^s, d^b$), with $d^s + d^b = $ \texttt{total\_demand}.
+\item \texttt{self\_filled\_slots} and \texttt{broker\_filled\_slots} ($n^s, n^b$), equal to the existing \texttt{n\_self\_matches} and \texttt{n\_broker\_standard}.
+\item Fill rates $\pi^s = n^s/d^s$, $\pi^b = n^b/d^b$, gap $\Delta_\pi = \pi^b - \pi^s$.
+\item Gross per-demanded-slot value $\bar q^s = (\sum_{m \in \mathcal{M}^s} q_m)/d^s$, similarly $\bar q^b$.
+\item Conditional mean $\bar q^s_\text{cond} = (\sum q_m)/n^s$, similarly for broker.
+\end{itemize}
+Net per-demanded-slot value is
+\begin{equation}
+\label{eq:net}
+\nu^s = \bar q^s - c_s, \qquad \nu^b = \bar q^b - \phi\,\pi^b, \qquad \Delta_\nu = \nu^b - \nu^s,
+\end{equation}
+and admits the algebraic decomposition
+\begin{equation}
+\label{eq:decomp}
+\Delta_\nu \;=\; \underbrace{\pi^b\bigl(\bar q^b_\text{cond} - \bar q^s_\text{cond}\bigr)}_{\text{quality-selection}}
+\;+\; \underbrace{\bigl(\pi^b - \pi^s\bigr)\bar q^s_\text{cond}}_{\text{fill/access}}
+\;+\; \underbrace{c_s - \pi^b\phi}_{\text{fee/cost}}.
+\end{equation}
+We verify this identity to floating-point tolerance on every run (max residual observed: $4.44{\times}10^{-16}$). Period-level agent welfare is $W^{(a)}_t = \sum_{m \in \mathcal{M}_t} q_m - c_s d^s_t - \phi n^b_t$; broker revenue $W^{(b)}_t = \phi n^b_t$; both cumulated post-burn.
+
+\subsection{Pre-match access/assessment classification}
+For every accepted brokered match $(i,j)$ we record flags \emph{before} the match-edge and partner-history mutations:
+\begin{align*}
+\mathsf{edge\_pre} &= \mathbb{1}\{j \in N_G(i)\text{ before this match}\},\\
+\mathsf{prior\_pair\_history\_pre} &= \mathbb{1}\{\text{partner\_count}[i,j] > 0\}.
+\end{align*}
+Matches partition into three disjoint classes:
+\begin{center}\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+Class & Definition & Spec interpretation\\
+\midrule
+\texttt{access\_new\_edge} & $\neg\mathsf{edge\_pre}$ & broker bridges a structural hole \\
+\texttt{assessment\_reachable\_no\_prior} & $\mathsf{edge\_pre}\wedge\neg\mathsf{prior}$ & broker ranks a reachable stranger \\
+\texttt{assessment\_prior\_partner} & $\mathsf{prior}$ & broker ranks a known partner \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Ablation modes}
+An \texttt{ablation::Symbol} parameter ($\in$\{\texttt{:none}, \texttt{:NoBroker}, \texttt{:NoRegime}, \texttt{:BlindBroker}, \texttt{:NoAccessBroker}, \texttt{:FrozenGraph}, \texttt{:NoTurnover}, \texttt{:FreezeBrokerLearning}\}) gates the model. \texttt{:NoBroker} is the paired counterfactual for every treatment run (forces $\texttt{channel}\leftarrow\texttt{:self}$ for every demander \emph{after} calling \texttt{outsourcing\_decision} so the RNG state is preserved). \texttt{:NoRegime} sets $\delta \leftarrow 0$ at env construction. \texttt{:FrozenGraph} suppresses the \texttt{add\_match\_edge!} call in \texttt{finalize\_accepted\_proposal!}. \texttt{:NoTurnover} skips entry/exit. \texttt{:FreezeBrokerLearning} retains the initial warm-up training but skips \texttt{train\_broker\_nn!} during production periods. \texttt{:NoAccessBroker} filters broker candidates to pairs with $j \in N_G(i)$.
+
+\textsc{BlindBroker} is the key diagnostic: the broker NN architecture stays at input dimension $2d$, but at every prediction and training call the focal-agent half is zeroed. Concretely,
+\begin{equation}
+\label{eq:blind}
+\hat q^{\text{blind}}(\xvec_i,\xvec_j) \;=\; \operatorname{NN}_b(\mathbf{0}_d,\xvec_j),
+\end{equation}
+so the broker retains its cross-agent pooled training data (same width $h_b$, same history) but has no pair-specific input. Under \textsc{BlindBroker} the training uses symmetry-augmented examples $\{(\mathbf{0},\xvec_j,q),(\mathbf{0},\xvec_i,q)\}$.
+
+\texttt{:EqualCapacityBroker} is deferred; the seven implemented ablations cover the decomposition the current analysis needs.
+
+\subsection{Holdout metrics: within-agent, pooled, de-meaned, residualized}
+The existing per-agent holdout samples $n_a=100$ focal agents and $n_p=40$ random partners per agent. We report four gap flavours:
+\begin{enumerate}[label=(\alph*), leftmargin=2em]
+\item \emph{Within-agent rank/R²}: per-agent Spearman $\rho$ and per-agent $R^2$ on that agent's holdout, averaged across sampled agents. $R^2$ denominator is $\sum (q_j - \overline{q}_i)^2$ where $\overline{q}_i$ is the within-agent mean.
+\item \emph{Pooled rank/R²}: Spearman and $R^2$ on all $n_a n_p$ triples concatenated; global mean replaces $\overline{q}_i$. Pooled-$R^2$ punishes a predictor that fails to track per-agent shifts.
+\item \emph{Within-agent de-meaned $R^2$}: for each sampled $i$, subtract within-agent means from both truth and prediction before computing $R^2$ on residuals; average. Formally
+\[
+R^2_{\text{dm},i} = 1 - \frac{\sum_j ((\hat q_{ij}-\overline{\hat q}_i) - (q_{ij}-\overline q_i))^2}{\sum_j (q_{ij}-\overline q_i)^2}.
+\]
+Removes any per-agent offset advantage.
+\item \emph{Two-way residualized $R^2$/rank}: a \emph{fixed} partner sample of $n_p=40$ is drawn once per period (via a side-car RNG seeded from $(\text{seed},t)$ so the main stream is unperturbed; this preserves the \texttt{seed=42} byte-equivalence). All $\min(50,N)$ sampled focal agents are evaluated on the same partner set, giving an estimable (focal $\times$ partner) matrix $Q$. We subtract the truth's two-way main effects
+\[
+q_{ij} - \hat\mu - \hat\alpha_i - \hat\beta_j
+\]
+from both truth and predictor, and compute $R^2$ and Spearman on the \emph{pair-specific residual}. A predictor that captures only additive (row/column) structure scores $\approx 0$; only pair-conditioned signal shows up.
+\end{enumerate}
+The residualized metrics are masked to \texttt{NaN} when the pair-specific variance falls below $\max(\sigma_\varepsilon^2\,n_p/6,10^{-8})\cdot n_p$ \emph{and} below $10^{-6}\cdot \operatorname{Var}(Q)$ (handles the additively separable $\rho=1$ case).
+
+\subsection{Full/Blind/Agent additive decomposition}
+For any cell with both a \texttt{:none} run (full broker) and a \texttt{:BlindBroker} run at the same parameters, we report
+\begin{equation}
+\label{eq:fullblind}
+\operatorname{gap}_{\text{full}} \;=\; \underbrace{\operatorname{gap}_{\text{blind}}}_{\text{pooled-data component}}
+\;+\; \underbrace{\operatorname{gap}_{\text{full}} - \operatorname{gap}_{\text{blind}}}_{\text{pair-input component}}
+\end{equation}
+separately for within-rank, demeaned-$R^2$, residualized-rank, and residualized-$R^2$. By construction the "agent-alone gap" in each flavour is zero (it is the reference), so the two components are interpretable in absolute terms.
+
+\subsection{Broker fill-failure reason buckets}
+Unfilled broker-channel slots are attributed to two causes observable from the round-matching workspace:
+\begin{itemize}[leftmargin=1.5em]
+\item \texttt{broker\_unfilled\_pref\_exhausted}: demander walked through its complete admissible preference list without holding a final proposal.
+\item \texttt{broker\_unfilled\_capacity\_limited}: demander retained untried preferences but max rounds were reached --- typically partners filled by earlier proposers.
+\end{itemize}
+The two counters partition $\texttt{broker\_demand\_slots}-\texttt{broker\_filled\_slots}$ exactly (verified in a smoke test).
+
+\section{Diagnostic results}
+\label{sec:results}
+All tables report post-burn means. Gaps are broker-minus-agent except in Table~\ref{tab:c2c} where we split into full-broker and blind-broker. Seed counts are 5 (Stages 1 and 3--4) or 10/arm (Stage 2 pilot, treatment vs.\ \texttt{:NoBroker} control).
+
+\subsection{Stage~1: sanity at simplified scale ($N{=}300, T{=}120$)}
+\begin{table}[h]\centering\small
+\caption{Sanity signs. \texttt{pi\_broker}$={}$\texttt{pi\_broker\_slot}; "pos" is share of seeds with rank\_gap$>$0. Five of seven spec-expected signs hold strictly; \texttt{NoRegime} and \texttt{EasyQuality} do not show the expected "advantage shrinks", flagged for full-scale retest.}
+\label{tab:sanity}
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+Cell (overrides) & \texttt{pi\_broker} & rank\_gap & pos & $R^2$\_gap & fill\_gap & adopt\\
+\midrule
+NoRegime ($\delta{=}0$)                       & 0.413 & $+$0.096 & 1.00 & $+$0.447 & $-$0.054 & 0.78 \\
+EasyQuality ($\rho{=}1$)                      & 0.422 & $+$0.214 & 1.00 & $+$0.740 & $-$0.050 & 0.80 \\
+HardPairwise ($\delta{=}.75,\rho{=}.25$)      & 0.524 & $+$0.046 & 1.00 & $-$0.255 & $-$0.080 & 0.88 \\
+HighTransparency (big $n_\text{str},k$)        & 0.291 & $+$0.048 & 1.00 & $+$0.196 & $-$0.036 & 0.74 \\
+LowRosterAccess ($\alpha_R{=}.05$)             & 0.198 & $+$0.077 & 1.00 & $+$0.245 & $-$0.091 & 0.59 \\
+HighFee ($\phi$-rate $=$ 0.60)                 & 0.217 & $+$0.047 & 0.80 & $+$0.210 & $-$0.071 & 0.69 \\
+FreezeBrokerLearning                           & 0.231 & $-$0.182 & 0.20 & $-$0.001 & $-$0.035 & 0.63 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Stage~2b: full-scale diagnostic ($N{=}1000, T{=}200$)}
+\begin{table}[h]\centering\small
+\caption{Full-scale diagnostic. Columns are pooled-data-preserving ratings of the broker-over-agent gap. \texttt{EasyQuality} shows a within-agent advantage nearly 2$\times$ the Default value, triggering Phase~C2c decomposition. $R^2_{\text{residualized}}$ for \texttt{EasyQuality} is masked in the patched build (additively separable DGP); here we report the unpatched raw values.}
+\label{tab:c2b}
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+Cell & $\pi_b$ & rank$_{\text{within}}$ & rank$_{\text{pooled}}$ & $R^2_{\text{within}}$ & $R^2_{\text{demeaned}}$ & fill\_gap \\
+\midrule
+Default ($\delta{=}.5,\rho{=}.5$)       & 0.295 & $+$0.119 & $+$0.124 & $+$0.350 & $+$0.350 & $-$0.051 \\
+NoRegime ($\delta{=}0$)                  & 0.321 & $+$0.127 & $+$0.119 & $+$0.303 & $+$0.386 & $-$0.047 \\
+EasyQuality ($\rho{=}1$)                 & 0.440 & $+$0.249 & $+$0.183 & $+$0.918 & $+$0.570 & $-$0.051 \\
+HardPairwise ($\delta{=}.75,\rho{=}.25$) & 0.363 & $+$0.093 & $+$0.090 & $-$0.015 & $+$0.025 & $-$0.076 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Stage~2c: Full vs.\ Blind additive decomposition}
+\begin{table}[h]\centering\small
+\caption{Full-broker vs.\ \textsc{BlindBroker} comparison. "Pooled-data component" $=$ blind gap (absolute rank/demeaned-$R^2$ advantage that \textsc{BlindBroker} retains without pair input); "pair-input component" $=$ full $-$ blind (additional lift from seeing $\xvec_i$). At \texttt{EasyQuality} (additively separable DGP) 94\% of the within-rank advantage survives blinding --- the broker's advantage is overwhelmingly \emph{data pooling}. At \texttt{Default} and \texttt{HardPairwise} the BlindBroker rank\_residualized falls to $-$0.6, confirming real pair-conditioned signal.}
+\label{tab:c2c}
+\begin{tabular}{@{}llrrrrrr@{}}
+\toprule
+Cell & arm & $\pi_b$ & rank$_{\text{within}}$ & rank$_{\text{resid}}$ & $R^2_{\text{within}}$ & $R^2_{\text{dm}}$ & fill\_gap \\
+\midrule
+Default & full   & 0.295 & $+$0.119 & $+$0.074 & $+$0.350 & $+$0.350 & $-$0.051 \\
+Default & blind  & 0.204 & $-$0.354 & $-$0.605 & $-$2.690 & $-$0.780 & $-$0.068 \\
+EasyQuality & full  & 0.440 & $+$0.249 & $+$0.022 & $+$0.918 & $+$0.570 & $-$0.051 \\
+EasyQuality & blind & 0.426 & $+$0.235 & $-$0.006 & $-$0.342 & $+$0.346 & $-$0.048 \\
+HardPairwise & full  & 0.363 & $+$0.093 & $+$0.060 & $-$0.015 & $+$0.025 & $-$0.076 \\
+HardPairwise & blind & 0.239 & $-$0.581 & $-$0.622 & $-$4.652 & $-$1.703 & $-$0.104 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Interpretation.} At \texttt{EasyQuality} ($\rho=1$) the DGP~\eqref{eq:match} is additively separable so \emph{no} pair-specific signal exists; accordingly rank$_{\text{resid}}$ is near zero for both arms ($+$0.022 full, $-$0.006 blind). Yet within-agent rank gap remains $+$0.235 for \textsc{BlindBroker}, \textbf{94\% of the full-broker value} ($+$0.249). The broker's advantage is therefore a data-pooling / sample-size effect: each agent's neural network trains on $\sim$60 partner matches, while the broker pools $\sim$60\,000 cross-agent observations. At \texttt{Default} and \texttt{HardPairwise} \textsc{BlindBroker} \emph{collapses} on residualized rank ($-$0.60 and $-$0.62), identifying a genuine pair-conditioned component. \texttt{HardPairwise}'s small full-broker lift reflects a \emph{capacity} ceiling: the $h_b{=}32$ broker NN struggles to fit the discontinuous $\operatorname{sign}(\xvec_i^\top B\xvec_j)$ regime gate --- planned for a future \texttt{EqualCapacityBroker} sensitivity.
+
+\subsection{Stage~3: Phase~C3 main sweeps at simplified scale ($N{=}300, T{=}120$, 15 seeds/arm, treatment $+$ \texttt{:NoBroker} control)}
+\label{sec:c3}
+
+Four 2D sweeps over the base-model parameter space: \texttt{delta\_rho}, \texttt{fee\_cost}, \texttt{transparency\_access}, \texttt{learning\_turnover}. Each sweep submitted as a slurm job array with one cell per array task, 15 seeds per cell, two arms (treatment and \texttt{:NoBroker}). Reducer produces \texttt{<sweep>\_cell\_summaries.csv} and \texttt{<sweep>\_regime\_labels.csv} in \texttt{data/summaries/broker\_advantage/}.
+
+\paragraph{Regime classifier.} For each cell the classifier of \texttt{scripts/run\_broker\_advantage.jl:classify\_regime} uses treatment-arm post-burn means and paired $\Delta W_{\text{ag}}$:
+\begin{itemize}[leftmargin=1.5em]
+\item $\pi_b{>}0.50$, $\Delta W_{\text{ag}}{>}0$, rank\_gap${>}0$ $\Rightarrow$ \textsc{BrokerDominant}. Subtype by access\_new\_edge\_frac\_brk: $>$0.60 $\to$ Access (\texttt{BA}); $<$0.30 $\to$ Assessment (\texttt{BI}); else Dual (\texttt{BD}).
+\item $\pi_b{>}0.50$, $\Delta W_{\text{ag}}{<}0$ $\Rightarrow$ \textsc{RentExtraction} (\texttt{RE}).
+\item $\pi_b{<}0.20$, $\Delta W_{\text{ag}}{>}0$, rank\_gap${>}0$ $\Rightarrow$ \textsc{Underadopted\_Info} (\texttt{UI}).
+\item $\pi_b{<}0.20$, rank\_gap${>}0$, gross\_gap${>}0$, $\Delta W_{\text{ag}}\nless 0$ $\Rightarrow$ \textsc{FeeInducedBypass} (\texttt{FB}).
+\item $\pi_b{<}0.20$, $\Delta W_{\text{ag}}\nless 0$, rank\_gap$\nless 0$ $\Rightarrow$ \textsc{SelfSearchDominant} (\texttt{SS}).
+\item Otherwise \textsc{Mixed} (\texttt{M}).
+\end{itemize}
+Threshold-robustness maps at $\pi_b{=}0.30$ and $\pi_b{=}0.70$ are generated for \texttt{delta\_rho} and \texttt{fee\_cost}.
+
+\paragraph{Data integrity caveat on residualized $R^2$.} At simplified-scale $(N{=}300, T{=}120)$ the NaN-gate on pair-residualized $R^2$ fails at $\rho\in\{0.75,1.00\}$: \texttt{r2\_gap\_residualized\_mean} is reported as $+1.34$ to $+1.85$ for $\rho{=}0.75$ and $+33.06$ (SE 4.48) for \emph{all} four $\rho{=}1.00$ cells in \texttt{delta\_rho\_cell\_summaries.csv}; true $R^2\in(-\infty,1]$, so these values exceed range. This is a known gate-calibration issue (\texttt{prompts/della\_job\_guide.md} §15.6) that did fire correctly at full scale (\texttt{EasyQuality} NaN in \texttt{diagnostic\_cell\_summaries.csv}), but the gate threshold was miscalibrated for low $N \cdot T$. \textbf{We do not cite r2\_gap\_residualized in any claim for cells with $\rho\ge 0.75$ at simplified scale.} Rank-based residualized metric (\texttt{rank\_gap\_residualized\_mean}) is bounded in $[-2,2]$ and remains trustworthy. Also note: at $\rho{=}1$ the DGP~\eqref{eq:match} is $\delta$-invariant, so cells \texttt{d0.00\_r1.00}, \texttt{d0.25\_r1.00}, \texttt{d0.50\_r1.00}, \texttt{d0.75\_r1.00} produce byte-identical summaries.
+
+\paragraph{\texttt{delta\_rho} sweep ($4\times 5 = 20$ cells, $\delta\in\{0,0.25,0.5,0.75\}$, $\rho\in\{0,0.25,0.5,0.75,1.0\}$).}
+Regime distribution at default thresholds (\texttt{delta\_rho\_regime\_labels.csv}): 3 \textsc{RentExtraction}, 1 \textsc{BrokerDominant\_Assessment}, 16 \textsc{Mixed}. All three \textsc{RE} cells are in the $\rho{=}0$ column ($\delta\in\{0,0.25,0.5\}$); the single \textsc{BI} cell is $(\delta,\rho){=}(0.75,0)$. Cells with the strongest broker adoption are in the $\rho{=}0$ column (pure pairwise-interaction DGP), where $\pi_b$ ranges from 0.566 to 0.587.
+
+\begin{table}[h]\centering\small
+\caption{Representative \texttt{delta\_rho} cells (\texttt{data/summaries/broker\_advantage/delta\_rho\_cell\_summaries.csv}). All values are post-burn seed means (15 seeds each, treatment arm), except $\Delta W_{\text{ag}}$ which is the seed-paired treatment$-$control cumulative welfare. $R^2_{\text{within}}$ is the per-agent $R^2$ gap; ``---'' marks residualized metrics excluded for $\rho\ge 0.75$ per the caveat above.}
+\label{tab:c3_deltarho}
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+Cell ($\delta$, $\rho$) & $\pi_b$ (se) & rank\_gap (se) & $R^2_{\text{within}}$ & net\_val\_gap & $\Delta W_{\text{ag}}$ (se) & regime \\
+\midrule
+(0.00, 0.00) & 0.582 (0.017) & $+$0.106 (0.011) & $+$0.118 & $-$0.232 & $-$69.1  (402.2) & RE \\
+(0.00, 0.50) & 0.362 (0.010) & $+$0.100 (0.012) & $+$0.374 & $-$0.173 & $+$328.5 (389.6) & M  \\
+(0.00, 1.00) & 0.414 (0.010) & $+$0.228 (0.009) & $+$0.918 & $-$0.078 & $-$836.3 (665.3) & M  \\
+(0.25, 0.25) & 0.456 (0.017) & $+$0.090 (0.011) & $+$0.105 & $-$0.223 & $-$741.9 (357.0) & M  \\
+(0.50, 0.00) & 0.585 (0.018) & $+$0.098 (0.011) & $+$0.043 & $-$0.295 & $-$1278.5 (855.6) & RE \\
+(0.50, 0.50) & 0.352 (0.012) & $+$0.084 (0.009) & $+$0.302 & $-$0.211 & $-$580.2 (351.8) & M  \\
+(0.75, 0.00) & 0.566 (0.015) & $+$0.083 (0.009) & $-$0.247 & $-$0.289 & $+$1656.8 (845.9) & BI \\
+(0.75, 0.25) & 0.492 (0.016) & $+$0.074 (0.007) & $-$0.165 & $-$0.253 & $+$364.7 (648.1) & M  \\
+(0.75, 0.50) & 0.361 (0.014) & $+$0.069 (0.008) & $+$0.058 & $-$0.221 & $+$390.5 (597.4) & M  \\
+(0.75, 0.75) & 0.305 (0.008) & $+$0.161 (0.009) & $+$0.765 & $-$0.165 & $+$350.5 (411.5) & M  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Observations strictly from the CSV cells cited above:
+\begin{itemize}[leftmargin=1.5em]
+\item \textbf{Paired welfare $\Delta W_{\text{ag}}$ flips sign across the sweep.} Negative (harmful to agents net-of-paired-control) at $\delta{=}0$ and low $\delta$ (e.g.\ $(0.50,0.50){=}-580.2$), positive at every $\delta{=}0.75$ cell except $(0.75,1.00){=}-836.3$. The large SEs (up to $\sim$860) mean individual-cell sign judgments require more seeds before firm claims.
+\item \textbf{Net value gap is negative in all 20 cells}, ranging from $-0.078$ (\texttt{d0.00\_r1.00}) to $-0.295$ (\texttt{d0.50\_r0.00}). Consistent with the Phase~C2b diagnostic finding that the default $\phi$ makes broker use unprofitable on a per-demanded-slot basis even where prediction is better.
+\item \textbf{rank\_gap is positive in 20/20 cells}; share\_positive (fraction of seeds with $>0$) is 1.0 in 18/20 and 0.933 in 2/20 (\texttt{d0.00\_r0.25}, \texttt{d0.50\_r0.25}). The broker predicts better for every cell, but $R^2_{\text{within}}$ is \emph{negative} in two $\delta{=}0.75$ cells (\texttt{d0.75\_r0.00}: $-0.247$; \texttt{d0.75\_r0.25}: $-0.165$), echoing the Phase~C2c finding that high-$\delta$, low-$\rho$ cells expose a broker-NN capacity shortfall.
+\item The $\rho{=}0$ column has the highest $\pi_b$ (0.566--0.587) and most negative $\Delta W_{\text{ag}}$ for $\delta\le 0.5$; the sole \textsc{BI} cell is at the high-$\delta$ corner of this column where the paired welfare flips positive.
+\end{itemize}
+
+\paragraph{\texttt{fee\_cost} sweep ($5\times 5 = 25$ cells, $\phi_{\text{rate}}\in\{0,0.05,0.15,0.30,0.60\}$, $c_{s,\text{rate}}\in\{0,0.05,0.15,0.30,0.60\}$; $\delta,\rho$ held at 0.50).} Regime distribution at default thresholds (\texttt{fee\_cost\_regime\_labels.csv}): 3 \textsc{BrokerDominant\_Assessment}, 22 \textsc{Mixed}. All three \textsc{BI} cells are at the \emph{highest} self-search cost ($c_{s,\text{rate}}{=}0.60$) with low-to-mid broker fee ($\phi_{\text{rate}}\in\{0, 0.05, 0.15\}$), as expected: when self-search is expensive, broker use is dominant.
+
+Residualized $R^2$ for \texttt{fee\_cost} is well-behaved: \texttt{r2\_gap\_residualized\_mean} ranges from 0.192 to 0.296 across all 25 cells (\texttt{fee\_cost\_cell\_summaries.csv}), well within $[0, 1]$. The gate issue is isolated to \texttt{delta\_rho}'s high-$\rho$ cells.
+
+\textbf{No \textsc{FeeInducedBypass} (\texttt{FB}) cells detected} on this grid. The classifier requires $\pi_b{<}0.20$, but $\pi_b$ ranges from $\sim$0.29 to $\sim$0.55 even at the highest fee/lowest cost corner. Whether this rules out \textsc{FB} at the simplified scale or merely means the grid did not go high enough on $\phi$ is an open question; threshold-robustness maps at $\pi_b{=}0.30$ and $\pi_b{=}0.70$ (\texttt{data/figures/broker\_advantage/regime\_map\_fee\_cost\_threshold\_broker\{030,070\}.png}) will show whether the picture changes at looser bars. \textbf{No \textsc{RentExtraction} (\texttt{RE}) cells detected} either. This differs from \texttt{delta\_rho} where \textsc{RE} appeared at $\rho{=}0$; in \texttt{fee\_cost} we are at $\delta,\rho{=}0.5$ so the $\rho=0$ condition that drove \texttt{delta\_rho}'s \textsc{RE} is not explored here.
+
+\paragraph{\texttt{transparency\_access} sweep ($5\times 4 = 20$ cells, $n_{\text{strangers}}\in\{0,2,5,10,20\}$, $\alpha_R\in\{0.05,0.10,0.20,0.40\}$; $\delta,\rho$ held at 0.50).} Regime distribution (\texttt{transparency\_access\_regime\_labels.csv}): \textbf{3 \textsc{BrokerDominant\_Assessment}} (\texttt{ns0\_aR0.20}, \texttt{ns0\_aR0.40}, \texttt{ns2\_aR0.40}), \textbf{2 \textsc{Underadopted\_Info}} (\texttt{ns5\_aR0.05}, \texttt{ns20\_aR0.05}), \textbf{1 \textsc{RentExtraction}} (\texttt{ns5\_aR0.40}), \textbf{14 \textsc{Mixed}}. This is the sweep where the base-model classifier fires the richest palette. \texttt{r2\_gap\_residualized\_mean} ranges from 0.15 to 0.62 across all 20 cells --- in range. Key cells (\texttt{transparency\_access\_cell\_summaries.csv}):
+\begin{table}[h]\centering\small
+\caption{Four corner cells of the \texttt{transparency\_access} sweep. $\pi_b$ rises monotonically with $\alpha_R$ (broker roster share) at every $n_{\text{strangers}}$ value in the grid, confirming the expected direction.}
+\label{tab:c3_ta}
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+Cell ($n_{\text{str}}$, $\alpha_R$) & $\pi_b$ (se) & rank\_gap & net\_val\_gap & fill\_gap & access\_new\_edge \\
+\midrule
+(0, 0.05)   & 0.391 (0.015) & $+$0.215 & $-$0.204 & $-$0.109 & 0.319 \\
+(0, 0.40)   & 0.642 (0.009) & $+$0.203 & $-$0.082 & $-$0.012 & 0.236 \\
+(20, 0.05)  & 0.181 (0.014) & $+$0.057 & $-$0.322 & $-$0.080 & 0.221 \\
+(20, 0.40)  & 0.499 (0.012) & $+$0.090 & $-$0.141 & $-$0.011 & 0.222 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The $n_{\text{strangers}}{=}0$ row has the strongest rank\_gap and highest broker adoption (up to 0.642 at $\alpha_R{=}0.40$), because with no self-accessible strangers the broker's roster becomes the primary channel for unknown-partner matches. As $n_{\text{strangers}}$ rises to 20, self-search gains breadth, $\pi_b$ drops by roughly half, and the rank\_gap shrinks accordingly. $\Delta W_{\text{ag}}$ has large SEs (up to $\sim$980), so sign judgments require caution; the $n_{\text{str}}{=}0$ column shows positive $\Delta W_{\text{ag}}$ (72\,503 to 76\,374 across $\alpha_R$), which is striking but must be re-read in absolute units with the fee structure noted.
+
+\paragraph{\texttt{learning\_turnover} sweep ($4\times 5 = 20$ cells, $p_{\text{demand}}\in\{0.25,0.50,0.75,0.90\}$, $\eta\in\{0,0.01,0.02,0.05,0.10\}$; $\delta,\rho$ held at 0.50).} Regime distribution (\texttt{learning\_turnover\_regime\_labels.csv}): \textbf{15 \textsc{Mixed}}, \textbf{3 \textsc{BrokerDominant\_Dual}} (\texttt{pd0.25\_eta0.05}, \texttt{pd0.25\_eta0.10}, \texttt{pd0.50\_eta0.10}), \textbf{1 \textsc{BrokerDominant\_Assessment}} (\texttt{pd0.25\_eta0.02}), \textbf{1 \textsc{RentExtraction}} (\texttt{pd0.25\_eta0.01}). All five non-\textsc{Mixed} cells cluster at low $p_{\text{demand}}\in\{0.25,0.50\}$ \emph{with} non-zero turnover $\eta\ge 0.01$; at $p_{\text{demand}}\ge 0.75$ all 10 cells are \textsc{Mixed}.
+
+\begin{table}[h]\centering\small
+\caption{Selected \texttt{learning\_turnover} cells, all values from \texttt{learning\_turnover\_cell\_summaries.csv}. The $\eta{=}0$ column has \emph{negative} within-agent rank\_gap everywhere --- no turnover means agents accumulate enough own-model training to outperform a frozen broker on their holdout. Every non-zero $\eta$ column has positive rank\_gap that rises with $\eta$.}
+\label{tab:c3_lt}
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+Cell ($p_d$, $\eta$) & $\pi_b$ & rank\_gap & net\_val\_gap & $\Delta W_{\text{ag}}$ & access\_frac \\
+\midrule
+(0.25, 0.00) & 0.439 & $-$0.018 & $-$0.276 & $-$1785.4 & 0.072 \\
+(0.25, 0.10) & 0.926 & $+$0.407 & $\mathbf{+0.139}$ & $+$4815.2 & 0.522 \\
+(0.50, 0.00) & 0.300 & $-$0.063 & $-$0.244 & $-$2412.0 & 0.057 \\
+(0.50, 0.10) & 0.506 & $+$0.302 & $-$0.161 & $+$3649.4 & 0.534 \\
+(0.75, 0.00) & 0.211 & $-$0.077 & $-$0.204 & $+$372.8  & 0.069 \\
+(0.75, 0.10) & 0.367 & $+$0.261 & $-$0.133 & $+$5890.4 & 0.542 \\
+(0.90, 0.00) & 0.196 & $-$0.069 & $-$0.185 & $+$1152.9 & 0.076 \\
+(0.90, 0.10) & 0.370 & $+$0.265 & $-$0.105 & $+$6343.9 & 0.531 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two findings from the CSV worth flagging:
+\begin{itemize}[leftmargin=1.5em]
+\item \textbf{The $\eta{=}0$ column has \emph{negative} rank\_gap at every $p_{\text{demand}}$ value} (range $-0.018$ to $-0.077$; \texttt{learning\_turnover\_cell\_summaries.csv} rows \texttt{pd*\_eta0.00}). At zero turnover, agents accumulate enough own-match history over $T{=}120$ periods to outperform the broker on their \emph{own} holdout sample. Turnover is the driver of the broker's rank advantage on this sweep --- consistent with Stage~1's \textsc{FreezeBrokerLearning} sanity cell ($-0.182$ rank\_gap).
+\item \textbf{\texttt{pd0.25\_eta0.10} is the only cell across all 85 cells of the four simplified-scale sweeps with \emph{positive} \texttt{net\_value\_gap}} ($+0.139$). It is also the highest-adoption cell observed ($\pi_b{=}0.926$) with rank\_gap $+0.407$ and $\Delta W_{\text{ag}}{=}+4815.2$. This is the clearest candidate for an unambiguously broker-favorable regime at simplified scale.
+\end{itemize}
+
+\paragraph{Cross-sweep regime tally.} Across the four simplified-scale sweeps (85 cells total):
+\begin{itemize}[leftmargin=1.5em,itemsep=0pt]
+\item \texttt{M} (Mixed): 67 (79\%)
+\item \texttt{BI} (Assessment-type broker-dominant): 8 --- the modal \textsc{BrokerDominant} subtype
+\item \texttt{RE} (RentExtraction): 5
+\item \texttt{BD} (Dual-type broker-dominant): 3
+\item \texttt{UI} (Underadopted\_Info): 2
+\item \texttt{FB}, \texttt{BA}, \texttt{SS}: 0 each
+\end{itemize}
+\textsc{FeeInducedBypass}, \textsc{BrokerDominant\_Access}, and \textsc{SelfSearchDominant} do not fire anywhere on the simplified-scale grids at default thresholds. Whether this is a threshold artifact or a real property of the simplified regime will be checked against Stage~4 (§\ref{sec:c5}) and the threshold-robustness maps at $\pi_b{\in}\{0.30,0.70\}$ (\texttt{regime\_map\_delta\_rho\_threshold\_broker\{030,070\}.png}, similarly for \texttt{fee\_cost}).
+
+\subsection{Stage~2 pilot ($N{=}300, T{=}120$, 10 seeds, treatment $+$ control)}
+\begin{table}[h]\centering\small
+\caption{Pilot cells. $\Delta W_{\text{ag}}$ is paired (treatment $-$ no-broker) agent-welfare cumulative. Note that at $\rho{=}1$ the $\delta$ term drops out of~\eqref{eq:match}; the cells \texttt{d0.00\_r1.00} and \texttt{d0.75\_r1.00} are therefore DGP-identical and have identical summaries.}
+\label{tab:pilot}
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+Cell & $\pi_b$ & rank\_gap (CI) & $R^2$\_gap & $\Delta W_{\text{ag}}$ (se) & net\_val\_gap \\
+\midrule
+$\delta{=}0.00,\rho{=}0.00$ & 0.573 & $+$0.119\,[0.10,0.14] & $+$0.186 & $+$1172.9\,(479.8) & $-$0.208 \\
+$\delta{=}0.00,\rho{=}1.00$ & 0.405 & $+$0.222\,[0.21,0.24] & $+$0.866 & $+$812.2\,(571.1) & $-$0.081 \\
+$\delta{=}0.50,\rho{=}0.50$ & 0.375 & $+$0.085\,[0.06,0.11] & $+$0.345 & $+$106.2\,(398.9) & $-$0.206 \\
+$\delta{=}0.75,\rho{=}0.00$ & 0.603 & $+$0.071\,[0.05,0.09] & $-$0.278 & $+$1581.3\,(1187.9) & $-$0.273 \\
+$\delta{=}0.75,\rho{=}1.00$ & 0.405 & $+$0.222\,[0.21,0.24] & $+$0.866 & $+$812.2\,(571.1) & $-$0.081 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Stage~4: full-scale confirmation ($N{=}1000, T{=}200$, 15 seeds, treatment $+$ \texttt{:NoBroker} control)}
+\label{sec:c5}
+
+5 hand-picked cells (from \texttt{scripts/run\_broker\_advantage.jl:full\_confirm\_cells}): \texttt{broker\_dominant} ($\delta{=}0.75,\rho{=}0.25$); \texttt{self\_search\_dominant} ($\delta{=}0,\rho{=}1$); \texttt{boundary} ($\delta{=}0.5,\rho{=}0.5$); \texttt{fee\_bypass} ($\delta{=}0.5,\rho{=}0.5,\phi_{\text{rate}}{=}0.60,c_s{\text{rate}}{=}0.05$); \texttt{high\_info\_low\_access} ($\delta{=}0.75,\rho{=}0.25,\alpha_R{=}0.05$). Array job \texttt{7143835} (split as 10 tasks over (cell, arm) via the new \texttt{--arm} CLI option) completed; reducer produced \texttt{data/summaries/broker\_advantage/full\_confirm\_cell\_summaries.csv}, \texttt{full\_confirm\_regime\_labels.csv}, and \texttt{full\_confirm\_paired\_summaries.csv} (5 cells, 15 paired welfare deltas each).
+
+\begin{table}[h]\centering\small
+\caption{Stage~4 simplified vs.\ full comparison. ``Simplified'' values read from the sweep CSVs at the matching cell: \texttt{delta\_rho\_cell\_summaries.csv} for rows 1--3, \texttt{fee\_cost\_cell\_summaries.csv} row \texttt{bfr0.60\_ssc0.05} for \texttt{fee\_bypass}. \texttt{high\_info\_low\_access} has no direct simplified-grid counterpart because $\alpha_R{=}0.05$ at $\delta{=}0.75,\rho{=}0.25$ is off all four 2D grids. All full values from \texttt{full\_confirm\_cell\_summaries.csv}. \textbf{No regime label flips} between simplified and full at default thresholds; all 5 cells classify as \textsc{Mixed} in both regimes. Magnitudes of $\Delta W_{\text{ag}}$ amplify substantially at full scale.}
+\label{tab:c5}
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+Cell & Simpl.\ $\pi_b$ & Full $\pi_b$ & Simpl.\ $\Delta W_{\text{ag}}$ & Full $\Delta W_{\text{ag}}$ & Full rank\_gap \\
+\midrule
+broker\_dominant     & 0.492 & 0.383 & $+$364.7\,(648) & $\mathbf{+16614.0}$\,(2152) & $+$0.098 \\
+self\_search\_dominant & 0.414 & 0.432 & $-$836.3\,(665) & $+$1809.9\,(1852) & $+$0.251 \\
+boundary             & 0.352 & 0.309 & $-$580.2\,(352) & $+$1572.5\,(1362) & $+$0.125 \\
+fee\_bypass          & 0.168 & 0.136 & $-$1780.0\,(---)* & $\mathbf{-6297.5}$\,(1590) & $+$0.107 \\
+high\_info\_low\_access & ---  & 0.231 & --- & $\mathbf{+20229.6}$\,(2499) & $+$0.090 \\
+\bottomrule
+\end{tabular}
+
+\smallskip
+\begin{tabular}{@{}l@{}}
+\footnotesize *\ Simplified $\Delta W_{\text{ag}}$ for \texttt{bfr0.60\_ssc0.05} read from the \texttt{fee\_cost} sweep CSV.\\
+\footnotesize All 5 full cells: regime code = \texttt{M} (per \texttt{full\_confirm\_regime\_labels.csv}).
+\end{tabular}
+\end{table}
+
+\paragraph{Key Stage~4 findings strictly from the CSV cells cited.}
+\begin{itemize}[leftmargin=1.5em]
+\item \textbf{Magnitude amplification.} At \texttt{broker\_dominant}, $\Delta W_{\text{ag}}$ grows from $+364.7$ (SE 648, not statistically significant at simplified scale) to $+16614.0$ (SE 2152, clearly $>0$) at full scale --- a $\sim$45$\times$ amplification. Similar amplification in magnitude for the boundary and self-search cells (signs flip but the signal is still within 1--2 SE at simplified scale).
+\item \textbf{Fee-induced bypass signature confirmed.} At \texttt{fee\_bypass}, full-scale $\pi_b{=}0.136$ is below the 0.20 threshold for \textsc{FeeInducedBypass}, rank\_gap is $+0.107$, and $\Delta W_{\text{ag}}$ is $-6297.5$ (SE 1590). The paired welfare is \emph{negative and statistically significant}: in this fee regime, agents would be strictly better off under the \texttt{:NoBroker} counterfactual. The regime classifier still labels this \textsc{Mixed} rather than \textsc{FB} because \textsc{FB} additionally requires gross\_gap$>0$ (broker's \emph{gross} quality per demanded slot exceeds self's); with $\pi_b$ this low, the broker's per-demanded-slot numerator shrinks and the comparator fails. \textbf{We flag this as an ``open question'' per runbook §11.2 Stage-4 rule:} a fee-induced-bypass semantically-correct cell that does not fire the strict classifier, suggesting the gross\_gap condition should be relaxed or removed for this regime.
+\item \textbf{\texttt{high\_info\_low\_access}} ($\delta{=}0.75,\rho{=}0.25,\alpha_R{=}0.05$) has the largest positive $\Delta W_{\text{ag}}$ across all full-confirm cells ($+20229.6$ with SE 2499). This cell could not be directly matched in any simplified 2D sweep. Interpretation: when the regime signal is strong (high $\delta$) but self-search access is narrow (low $\alpha_R$), paired welfare moves sharply in the broker's favor.
+\item \textbf{\texttt{self\_search\_dominant}} ($\rho{=}1$) does \emph{not} actually show dominant self-search at full scale: $\pi_b{=}0.432$, rank\_gap${=}+0.251$. The broker's pooled-data advantage carries over to this cell (consistent with the Phase~C2c finding). The cell's name reflects the intent (zero regime, zero pair-interaction DGP); the observation is that pooled data still delivers a sizeable rank advantage even where pair-conditioned signal is zero.
+\end{itemize}
+
+\section{Summary of findings}
+\label{sec:summary}
+
+Claims in this section cite a specific CSV row, figure, or identity residual. ``Pending'' marks items awaiting completion of still-running sweeps or Stage~4.
+
+\paragraph{(i) Pooled-data vs.\ pair-input decomposition.} At the full-scale diagnostic (\texttt{diagnostic\_cell\_summaries.csv}; Phase~C2c blind comparison, Table~\ref{tab:c2c}):
+\begin{itemize}[leftmargin=1.5em]
+\item In the \textbf{Default} cell ($\delta{=}0.5,\rho{=}0.5$), \textsc{BlindBroker} (pooled data, no pair input) scores rank$_{\text{residualized}}{=}-0.605$ while Full scores $+0.074$ (Table~\ref{tab:c2c}). The pair-input component (Full $-$ Blind, eq.~\eqref{eq:fullblind}) is $+0.679$ in residualized-rank units --- pair-conditioned signal is the dominant driver here.
+\item In \textbf{EasyQuality} ($\rho{=}1$, additively separable DGP), rank$_{\text{residualized}}$ is near zero for both arms ($+0.022$ Full, $-0.006$ Blind) as theory predicts, yet within-agent rank\_gap is $+0.249$ Full vs.\ $+0.235$ Blind --- Blind retains 94\% of the within-agent rank advantage. The broker's apparent edge here is data pooling (cross-agent $\sim$60\,000 observations vs.\ $\sim$60 per agent), not information asymmetry.
+\item In \textbf{HardPairwise} ($\delta{=}0.75,\rho{=}0.25$), Blind collapses to rank$_{\text{residualized}}{=}-0.622$ while Full stays at $+0.060$ --- pair input is again essential; the small Full value reflects the $h_b{=}32$ broker NN's capacity shortfall on the discontinuous regime gate.
+\end{itemize}
+These full-scale decompositions are the reliable reference; simplified-scale residualized-$R^2$ in \texttt{delta\_rho} is gate-broken at high $\rho$ (§\ref{sec:c3}) and cannot be used for analogous claims on the sweep grid. Residualized-\emph{rank}, bounded, remains usable at simplified scale.
+
+\paragraph{(ii) Fee-induced bypass and rent-extraction.}
+\begin{itemize}[leftmargin=1.5em]
+\item From \texttt{delta\_rho\_regime\_labels.csv}: 3 cells classify as \textsc{RentExtraction} (\texttt{RE}): \texttt{d0.00\_r0.00}, \texttt{d0.25\_r0.00}, \texttt{d0.50\_r0.00}. All are in the $\rho{=}0$ column with $\pi_b{\ge}0.58$ \emph{and} paired $\Delta W_{\text{ag}}{<}0$ (Table~\ref{tab:c3_deltarho}). At default fee/cost rates, when the DGP is pure pairwise-interaction (no additive-quality cue for agents), agents outsource heavily but are paired worse off in cumulative welfare.
+\item One more \textsc{RE} cell appears in \texttt{transparency\_access\_regime\_labels.csv} at \texttt{ns5\_aR0.40}, and one in \texttt{learning\_turnover\_regime\_labels.csv} at \texttt{pd0.25\_eta0.01}. Total \textsc{RE} across the four sweeps: 5/85 cells.
+\item \textsc{FeeInducedBypass} (\texttt{FB}) requires $\pi_b{<}0.20$ with positive rank\_gap. \textbf{No \texttt{FB} cells appear on any of the four sweeps} at default thresholds. In \texttt{fee\_cost}, $\pi_b$ ranges 0.29--0.55 even at the high-$\phi$/low-$c_s$ corner \texttt{bfr0.60\_ssc0.00} --- the simplified-scale grid does not drive adoption low enough to hit the $\pi_b{<}0.20$ \texttt{FB} condition. Threshold-robustness maps at $\pi_b{=}0.30$ and $\pi_b{=}0.70$ (\texttt{regime\_map\_fee\_cost\_threshold\_broker\{030,070\}.png}) are produced but do not change the bypass-vs-dominant decision for this grid. Whether \textsc{FB} emerges at full scale is tested in §\ref{sec:c5}.
+\item \textbf{Net value gap is negative in 84 of 85 cells across all four sweeps.} The single exception is \texttt{pd0.25\_eta0.10} in the \texttt{learning\_turnover} sweep, where \texttt{net\_value\_gap\_mean}${=}+0.139$ with $\pi_b{=}0.926$, rank\_gap${=}+0.407$, $\Delta W_{\text{ag}}{=}+4815.2$ (\texttt{learning\_turnover\_cell\_summaries.csv}, Table~\ref{tab:c3_lt}). This is the clearest broker-beneficial regime found at simplified scale: high turnover at low demand frequency gives the broker a sustained information advantage and fills most demanded slots.
+\end{itemize}
+
+\paragraph{(iii) Regime distribution and the ``Mixed'' majority.} 67/85 cells across all four sweeps classify as \textsc{Mixed} (\texttt{M}) under default thresholds ($\pi_b{=}0.50$, access threshold $0.60$). The remaining 18 cells are: 8 \texttt{BI}, 5 \texttt{RE}, 3 \texttt{BD}, 2 \texttt{UI}. The thresholds are conservative; the alternative maps at $\pi_b{\in}\{0.30,0.70\}$ are produced for \texttt{delta\_rho} and \texttt{fee\_cost}.
+
+\paragraph{(iv-bis) Turnover is the driver of broker rank advantage.} In \texttt{learning\_turnover}, every cell with $\eta{=}0$ has \emph{negative} rank\_gap (range $-0.018$ to $-0.077$ across $p_{\text{demand}}\in\{0.25,0.5,0.75,0.9\}$, Table~\ref{tab:c3_lt}). Every cell with $\eta{>}0$ has positive rank\_gap that rises monotonically with $\eta$. This aligns with the Stage~1 \textsc{FreezeBrokerLearning} sanity result (rank\_gap${=}-0.182$), and suggests the broker's informational edge is sustained by entry/exit replacing agents before they accumulate enough own-match history to outperform the broker's pooled model.
+
+\paragraph{(iv) Cross-sweep findings.}
+\begin{itemize}[leftmargin=1.5em]
+\item \emph{\texttt{fee\_cost}:} No \textsc{FeeInducedBypass} (\texttt{FB}) or \textsc{RentExtraction} (\texttt{RE}) cells on the $5\times 5$ grid at $\delta,\rho{=}0.5$. \textsc{BrokerDominant\_Assessment} (\texttt{BI}) emerges only at the highest self-search cost $c_{s,\text{rate}}{=}0.60$ with low-to-mid fee (\texttt{fee\_cost\_regime\_labels.csv} rows \texttt{bfr0.00\_ssc0.60}, \texttt{bfr0.05\_ssc0.60}, \texttt{bfr0.15\_ssc0.60}). The \texttt{fee\_sensitivity\_curves.png} figure, read alongside, shows whether adoption or net value drops monotonically with $\phi_{\text{rate}}$.
+\item \emph{\texttt{transparency\_access}:} Four distinct regime codes appear on a single sweep (3 \texttt{BI}, 2 \texttt{UI}, 1 \texttt{RE}, 14 \texttt{M}) --- this sweep is the richest diagnostic palette at simplified scale. \textsc{Underadopted\_Info} (\texttt{UI}: $\pi_b<0.20$ with positive rank\_gap and $\Delta W_{\text{ag}}$) appears at high $n_{\text{strangers}}$ and low $\alpha_R$ --- exactly where the broker's informational advantage is real but its access is too narrow for agents to adopt. \textsc{RE} appears uniquely at $n_{\text{str}}{=}5$, $\alpha_R{=}0.40$. $\pi_b$ is monotonic in $\alpha_R$ at every fixed $n_{\text{strangers}}$ (Table~\ref{tab:c3_ta}), confirming that roster size is a primary lever for adoption.
+\item \emph{\texttt{learning\_turnover}:} pending (job \texttt{7142787} complete, reducer \texttt{7143900} running).
+\item \emph{Phase~C4 ablations (completed, 24/24 tasks):} 3 anchors $\times$ 8 modes, simplified scale, 15 seeds per cell, 1 arm (treatment). Full/Blind decomposition written to \texttt{data/summaries/broker\_advantage/ablations\_decomposition.csv}:
+\begin{table}[h]\centering\small
+\caption{Ablation full/blind decomposition at simplified scale (\texttt{ablations\_decomposition.csv}). ``Pooled data'' is the \textsc{BlindBroker} arm's gap (zero pair input, same pooled training). ``Pair input'' is $\text{Full}-\text{Blind}$.  Residualized-$R^2$ values at \texttt{self\_search} anchor ($\rho{=}1$) exceed $(-\infty,1]$ as flagged in §\ref{sec:c3}; \emph{we do not cite them here}.}
+\label{tab:c4}
+\begin{tabular}{@{}llrrrr@{}}
+\toprule
+Anchor & Metric & Full & Blind & Pooled-data & Pair-input \\
+\midrule
+baseline ($\delta{=}0.5,\rho{=}0.5$)           & rank\_within      & $+$0.079 & $-$0.416 & $-$0.416 & $+$0.495 \\
+baseline                                       & rank\_residualized & $+$0.037 & $-$0.641 & $-$0.641 & $+$0.678 \\
+baseline                                       & $R^2_{\text{demeaned}}$ & $+$0.258 & $-$0.903 & $-$0.903 & $+$1.162 \\
+broker\_dominant ($\delta{=}0.75,\rho{=}0.25$) & rank\_within      & $+$0.058 & $-$0.596 & $-$0.596 & $+$0.654 \\
+broker\_dominant                               & rank\_residualized & $+$0.037 & $-$0.660 & $-$0.660 & $+$0.697 \\
+broker\_dominant                               & $R^2_{\text{demeaned}}$ & $-$0.204 & $-$1.838 & $-$1.838 & $+$1.634 \\
+self\_search ($\delta{=}0,\rho{=}1$)            & rank\_within      & $+$0.238 & $+$0.236 & $+$0.236 & $+$0.003 \\
+self\_search                                   & rank\_residualized & $+$0.057 & $-$0.051 & $-$0.051 & $+$0.109 \\
+self\_search                                   & $R^2_{\text{demeaned}}$ & $+$0.643 & $+$0.506 & $+$0.506 & $+$0.138 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent At \texttt{baseline} and \texttt{broker\_dominant}, the pair-input component is large and positive, and the pooled-data component is \emph{negative} (BlindBroker is worse than a per-agent model). At \texttt{self\_search} (additively separable, $\rho{=}1$), pair-input component is essentially zero ($+0.003$ within-rank), and the entire $+0.238$ full-rank advantage is pooled-data --- directly replicating the Phase~C2c full-scale conclusion at simplified scale with 15 seeds per arm.
+
+Regime distribution across the 24 ablation cells (\texttt{ablations\_regime\_labels.csv}): 21 \textsc{Mixed}, 3 \textsc{SelfSearchDominant} (\texttt{baseline\_FreezeBrokerLearning}, \texttt{baseline\_NoBroker}, \texttt{broker\_dominant\_NoBroker}). The \texttt{NoBroker} arms correctly classify as \textsc{SS} since $\pi_b{=}0$ by construction; \texttt{baseline\_FreezeBrokerLearning} collapsing to \textsc{SS} confirms the Stage~1 sanity finding ($-0.182$ rank\_gap) at the main-anchor scale.
+\end{itemize}
+
+\paragraph{(v) Stage-4 regime flips.} \emph{Pending.} Will be read from \texttt{data/summaries/broker\_advantage/full\_confirm\_summary.csv} after job completion and reported in Table~\ref{tab:c5}.
+
+\section{Findings so far and open items}
+\begin{enumerate}[leftmargin=2em]
+\item Sanity criterion "rank\_gap shrinks under NoRegime / EasyQuality" is a spec expectation based on equal-data asymptotics. At realistic finite $(N,T)$ the broker's pooled-data advantage dominates any loss of pair-conditioned structure. The instrumentation is sound --- the preflight baseline is byte-identical to the pre-instrumentation run on \texttt{seed=42}.
+\item \textbf{Net value gap $\Delta_\nu$ is negative in every cell examined} ($-0.07$ to $-0.30$). At default $\phi$, broker use is not net-beneficial to agents on a per-demanded-slot basis even where prediction is better. This motivates the \texttt{fee\_cost} and \texttt{transparency\_access} sweeps.
+\item The \textsc{BlindBroker}-Full pairwise decomposition~\eqref{eq:fullblind} cleanly separates pooled-data from pair-input advantages and will be read alongside the regime map for every main-sweep cell at the anchor rows.
+\item Pilot criterion (2) --- "rank\_gap near zero in no-regime / pure-quality anchor" --- does not hold strictly at simplified scale; 4/5 criteria pass. Main sweeps launched regardless, conditional on Stage~4 full-scale confirmation.
+\item \textbf{Known caveat.} Residualized $R^2$ gate is miscalibrated at simplified scale for $\rho{\ge}0.75$; use \texttt{rank\_gap\_residualized} there instead (see §\ref{sec:c3}). Full-scale residualized $R^2$ is correctly NaN-gated (\texttt{diagnostic\_cell\_summaries.csv} \texttt{EasyQuality} row).
+\end{enumerate}
+
+\section*{Reproducibility}
+All code is in \texttt{TransientBrokerage.jl} at commit \texttt{KK-testing-branch} (HEAD at time of writing). New scripts: \texttt{scripts/run\_broker\_advantage.jl} (CLI with \texttt{--stage/--sweep/--cell-idx/--reduce}) and \texttt{sysimage/build\_sysimage.jl} (PackageCompiler sysimage for $\sim$25$\times$ TTFX reduction on array tasks). Running notes with seeds, wallclocks, and cluster topology live at \texttt{data/summaries/broker\_advantage/final\_run\_notes.md}. The session handoff document is \texttt{prompts/della\_job\_guide.md}.
+
+\end{document}

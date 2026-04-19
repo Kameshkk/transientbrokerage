@@ -405,16 +405,20 @@ function train_broker_nn!(broker::Broker, params::ModelParams)
         resize!(broker.train_q, new_cap)
     end
 
-    # Build symmetry-augmented training data from window
+    # :BlindBroker — zero the focal-agent rows of the training input so the
+    # broker's NN learns q(0, x_j) (i.e., no access to x_i). The symmetry
+    # augmentation swaps i and j; for BlindBroker both copies use a zero focal
+    # column, so the broker effectively learns E[q | single partner type].
+    blind = params.ablation == :BlindBroker
     @inbounds for (idx, j) in enumerate(start_idx:n)
         for k in 1:d
-            broker.train_X[k, idx] = broker.history_Xi[k, j]
+            broker.train_X[k, idx] = blind ? 0.0 : broker.history_Xi[k, j]
             broker.train_X[d + k, idx] = broker.history_Xj[k, j]
         end
         broker.train_q[idx] = broker.history_q[j]
 
         for k in 1:d
-            broker.train_X[k, n_use + idx] = broker.history_Xj[k, j]
+            broker.train_X[k, n_use + idx] = blind ? 0.0 : broker.history_Xj[k, j]
             broker.train_X[d + k, n_use + idx] = broker.history_Xi[k, j]
         end
         broker.train_q[n_use + idx] = broker.history_q[j]

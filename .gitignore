@@ -31,3 +31,17 @@ Manifest.toml
 
 # macOS
 .DS_Store
+
+# Slurm stdout/stderr captures (keep the sbatch scripts, ignore the logs)
+slurm_logs/*.out
+slurm_logs/*.err
+
+# LaTeX build artifacts (keep .tex and .pdf, ignore intermediates)
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+
+# Claude Code session state
+.claude/
