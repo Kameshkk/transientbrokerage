@@ -150,23 +150,23 @@ No `src/*.jl` changes yet. No new scripts yet. No instrumentation yet.
 4. **Phase B3 — paired RNG + ablation modes**: add separate RNG streams (init/market/strategy/learning) so treatment and no-broker control share init+market shocks. Add `ablation::Symbol` enum on params or a dedicated field; implement `:NoBroker`, `:NoRegime`, `:BlindBroker`, `:EqualCapacityBroker`, `:NoAccessBroker`, `:FrozenGraph`, `:NoTurnover`, `:FreezeBrokerLearning`.
 5. **Phase C1 — new scripts**: `scripts/run_broker_advantage.jl` and `scripts/plot_broker_advantage.jl`, following the `scripts/explore_*.jl` style (CLI flags, JLD2 cache, `--rerun`, CSV summaries).
 6. **Phase C2 — sanity (Stage 1) + pilot (Stage 2)**: run the 7 sanity corners from the runbook and the 5 pilot cells (δ×ρ ∈ {(0,0),(0,1),(0.75,0),(0.75,1),(0.5,0.5)}) with N=300, d=6, T=120, T_burn=20, seeds=10, treatment+no-broker counterfactual, `network_measure_interval=5`. Gate on runbook acceptance criteria before proceeding.
-7. **Phase C3 — 4 main sweeps**: `delta_rho`, `fee_cost`, `transparency_access`, `learning_turnover` at N=300/d=6/T=120/T_burn=20, **seeds=15** (per user), treatment+control. Produce per-sweep `*_cell_summaries.csv`, `*_regime_labels.csv`, `*_phase_panels.png`, `regime_map_*.png`, plus threshold-robustness maps for delta_rho and fee_cost.
-8. **Phase C4 — ablations**: 8 ablations × 2–4 anchor cells (baseline anchor δ=0.5 ρ=0.5 plus sweep-selected anchors), 15 seeds. Outputs `ablation_bars.png`, `ablation_temporal_selected.png`.
-9. **Phase C5 — full-model confirmation**: N=1000, d=8, T=200, T_burn=30, h_a=16, h_b=32, `network_measure_interval=20`, seeds=15 (minimum; 30 preferred if runtime allows), fresh seed block, ~5 selected cells. Output `full_confirm_comparison.png`. Flag any classification flips vs simplified sweeps.
+7. **Phase C3 — 4 main sweeps**: `delta_rho`, `fee_cost`, `transparency_access`, `learning_turnover` at N=300/d=6/T=120/T_burn=20, **seeds=15** (per user), treatment+control. Produce per-sweep `*_cell_summaries.csv`, `*_regime_labels.csv`, `*_phase_panels.pdf`, `regime_map_*.pdf`, plus threshold-robustness maps for delta_rho and fee_cost.
+8. **Phase C4 — ablations**: 8 ablations × 2–4 anchor cells (baseline anchor δ=0.5 ρ=0.5 plus sweep-selected anchors), 15 seeds. Outputs `ablation_bars.pdf`, `ablation_temporal_selected.pdf`.
+9. **Phase C5 — full-model confirmation**: N=1000, d=8, T=200, T_burn=30, h_a=16, h_b=32, `network_measure_interval=20`, seeds=15 (minimum; 30 preferred if runtime allows), fresh seed block, ~5 selected cells. Output `full_confirm_comparison.pdf`. Flag any classification flips vs simplified sweeps.
 
 ## 7. Required final figure set (runbook §13 + plotting spec §17)
 
 Under `data/figures/broker_advantage/`:
-- `sanity_diagnostics.png`, `pilot_phase_panels.png`, `pilot_temporal_overlay.png`
-- `delta_rho_phase_panels.png`, `fee_cost_phase_panels.png`, `transparency_access_phase_panels.png`, `learning_turnover_phase_panels.png`
-- `regime_map_delta_rho.png`, `regime_map_fee_cost.png`, `regime_map_transparency_access.png`, `regime_map_learning_turnover.png`
-- `regime_map_delta_rho_threshold_broker030.png`, `regime_map_delta_rho_threshold_broker070.png`, `regime_map_fee_cost_threshold_broker030.png`, `regime_map_fee_cost_threshold_broker070.png`
-- `temporal_cases_overlay.png`
-- `advantage_dynamics_broker_dominant.png`, `advantage_dynamics_self_search.png`
-- `phase_portraits_broker_dominant.png`, `phase_portraits_self_search.png`
-- `fee_sensitivity_curves.png`
-- `ablation_bars.png`, `ablation_temporal_selected.png`
-- `full_confirm_comparison.png`
+- `sanity_diagnostics.pdf`, `pilot_phase_panels.pdf`, `pilot_temporal_overlay.pdf`
+- `delta_rho_phase_panels.pdf`, `fee_cost_phase_panels.pdf`, `transparency_access_phase_panels.pdf`, `learning_turnover_phase_panels.pdf`
+- `regime_map_delta_rho.pdf`, `regime_map_fee_cost.pdf`, `regime_map_transparency_access.pdf`, `regime_map_learning_turnover.pdf`
+- `regime_map_delta_rho_threshold_broker030.pdf`, `regime_map_delta_rho_threshold_broker070.pdf`, `regime_map_fee_cost_threshold_broker030.pdf`, `regime_map_fee_cost_threshold_broker070.pdf`
+- `temporal_cases_overlay.pdf`
+- `advantage_dynamics_broker_dominant.pdf`, `advantage_dynamics_self_search.pdf`
+- `phase_portraits_broker_dominant.pdf`, `phase_portraits_self_search.pdf`
+- `fee_sensitivity_curves.pdf`
+- `ablation_bars.pdf`, `ablation_temporal_selected.pdf`
+- `full_confirm_comparison.pdf`
 
 Storage:
 - Sims cache: `data/sims/broker_advantage/*.jld2`

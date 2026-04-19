@@ -499,21 +499,21 @@ The full-model confirmation should answer whether the simplified-stage classific
 
 The plotting spec gives exact layouts. At a minimum, the final analysis must include:
 
-1. `delta_rho_phase_panels.png`
-2. `fee_cost_phase_panels.png`
-3. `transparency_access_phase_panels.png`
-4. `learning_turnover_phase_panels.png`
-5. `regime_map_delta_rho.png`
-6. `regime_map_fee_cost.png`
-7. `regime_map_transparency_access.png`
-8. `regime_map_learning_turnover.png`
-9. `temporal_cases_overlay.png`
-10. `advantage_dynamics_broker_dominant.png`
-11. `advantage_dynamics_self_search.png`
-12. `phase_portraits_broker_dominant.png`
-13. `phase_portraits_self_search.png`
-14. `ablation_bars.png`
-15. `full_confirm_comparison.png`
+1. `delta_rho_phase_panels.pdf`
+2. `fee_cost_phase_panels.pdf`
+3. `transparency_access_phase_panels.pdf`
+4. `learning_turnover_phase_panels.pdf`
+5. `regime_map_delta_rho.pdf`
+6. `regime_map_fee_cost.pdf`
+7. `regime_map_transparency_access.pdf`
+8. `regime_map_learning_turnover.pdf`
+9. `temporal_cases_overlay.pdf`
+10. `advantage_dynamics_broker_dominant.pdf`
+11. `advantage_dynamics_self_search.pdf`
+12. `phase_portraits_broker_dominant.pdf`
+13. `phase_portraits_self_search.pdf`
+14. `ablation_bars.pdf`
+15. `full_confirm_comparison.pdf`
 
 Every phase-panel figure must show, at minimum:
 

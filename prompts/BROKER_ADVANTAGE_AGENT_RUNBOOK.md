@@ -359,7 +359,7 @@ Expected outputs:
 ```text
 data/sims/broker_advantage/sanity.jld2
 data/summaries/broker_advantage/sanity_summary.csv
-data/figures/broker_advantage/sanity_diagnostics.png
+data/figures/broker_advantage/sanity_diagnostics.pdf
 ```
 
 Required sanity checks:
@@ -414,8 +414,8 @@ Expected outputs:
 ```text
 data/sims/broker_advantage/pilot_delta_rho.jld2
 data/summaries/broker_advantage/pilot_cell_summaries.csv
-data/figures/broker_advantage/pilot_phase_panels.png
-data/figures/broker_advantage/pilot_temporal_overlay.png
+data/figures/broker_advantage/pilot_phase_panels.pdf
+data/figures/broker_advantage/pilot_temporal_overlay.pdf
 ```
 
 Pilot acceptance criteria:
@@ -475,8 +475,8 @@ Required outputs per sweep:
 data/sims/broker_advantage/<sweep>.jld2
 data/summaries/broker_advantage/<sweep>_cell_summaries.csv
 data/summaries/broker_advantage/<sweep>_regime_labels.csv
-data/figures/broker_advantage/<sweep>_phase_panels.png
-data/figures/broker_advantage/regime_map_<sweep>.png
+data/figures/broker_advantage/<sweep>_phase_panels.pdf
+data/figures/broker_advantage/regime_map_<sweep>.pdf
 ```
 
 ## 11. Stage 4: ablations
@@ -504,8 +504,8 @@ Required outputs:
 ```text
 data/sims/broker_advantage/ablations.jld2
 data/summaries/broker_advantage/ablation_summary.csv
-data/figures/broker_advantage/ablation_bars.png
-data/figures/broker_advantage/ablation_temporal_selected.png
+data/figures/broker_advantage/ablation_bars.pdf
+data/figures/broker_advantage/ablation_temporal_selected.pdf
 ```
 
 ## 12. Stage 5: full-model confirmation
@@ -547,7 +547,7 @@ Required outputs:
 ```text
 data/sims/broker_advantage/full_confirm.jld2
 data/summaries/broker_advantage/full_confirm_summary.csv
-data/figures/broker_advantage/full_confirm_comparison.png
+data/figures/broker_advantage/full_confirm_comparison.pdf
 ```
 
 The full-confirmation plot must compare simplified-stage and full-scale classifications. If a classification flips, report it explicitly.
@@ -557,27 +557,27 @@ The full-confirmation plot must compare simplified-stage and full-scale classifi
 At completion, the following figures must exist:
 
 ```text
-sanity_diagnostics.png
-pilot_phase_panels.png
-pilot_temporal_overlay.png
+sanity_diagnostics.pdf
+pilot_phase_panels.pdf
+pilot_temporal_overlay.pdf
 
-delta_rho_phase_panels.png
-fee_cost_phase_panels.png
-transparency_access_phase_panels.png
-learning_turnover_phase_panels.png
+delta_rho_phase_panels.pdf
+fee_cost_phase_panels.pdf
+transparency_access_phase_panels.pdf
+learning_turnover_phase_panels.pdf
 
-regime_map_delta_rho.png
-regime_map_fee_cost.png
-regime_map_transparency_access.png
-regime_map_learning_turnover.png
+regime_map_delta_rho.pdf
+regime_map_fee_cost.pdf
+regime_map_transparency_access.pdf
+regime_map_learning_turnover.pdf
 
-temporal_cases_overlay.png
-advantage_dynamics_broker_dominant.png
-advantage_dynamics_self_search.png
-phase_portraits_broker_dominant.png
-phase_portraits_self_search.png
-ablation_bars.png
-full_confirm_comparison.png
+temporal_cases_overlay.pdf
+advantage_dynamics_broker_dominant.pdf
+advantage_dynamics_self_search.pdf
+phase_portraits_broker_dominant.pdf
+phase_portraits_self_search.pdf
+ablation_bars.pdf
+full_confirm_comparison.pdf
 ```
 
 Additional figures are allowed if they support debugging, but do not substitute them for the required set.
